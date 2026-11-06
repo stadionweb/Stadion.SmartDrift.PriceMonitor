@@ -24,9 +24,9 @@ public sealed class CrawlerRegistry
 
     public IWebsiteCrawler? Find(string key) => crawlers.GetValueOrDefault(key);
 
-    public Task<CrawlResult> ExecuteAsync(string key, CrawlTarget target, CancellationToken cancellationToken)
+    public async Task<CrawlResult> ExecuteAsync(string key, CrawlTarget target, CancellationToken cancellationToken)
     {
         var crawler = Find(key) ?? throw new ArgumentException($"Unknown crawler key: {key}", nameof(key));
-        return crawler.CrawlAsync(target, cancellationToken);
+        return await crawler.CrawlAsync(target, cancellationToken);
     }
 }

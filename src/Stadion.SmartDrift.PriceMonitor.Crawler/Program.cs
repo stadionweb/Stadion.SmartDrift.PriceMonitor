@@ -1,7 +1,7 @@
 using Stadion.SmartDrift.PriceMonitor.Crawler;
 
 var builder = Host.CreateApplicationBuilder();
-builder.Services.AddSingleton<CrawlerRegistry>();
+builder.Services.AddCrawlerRuntime();
 
 using var host = builder.Build();
 await host.StartAsync();

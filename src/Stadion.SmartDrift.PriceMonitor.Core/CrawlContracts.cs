@@ -1,9 +1,9 @@
 namespace Stadion.SmartDrift.PriceMonitor.Core;
 
-public sealed record CrawlVariant(Guid Id, string? Gtin, string? ArticleNumber, string? Size, string? Color);
+public sealed record CrawlVariant(long Id, string? Gtin, string? ArticleNumber, string? Size, string? Color);
 
 public sealed record CrawlTarget(
-    Guid ProductId,
+    long ProductId,
     string? Brand,
     string? ProductName,
     string? ArticleNumber,
@@ -22,7 +22,7 @@ public enum VariantMatchMethod
 }
 
 public sealed record ProductVariantMatchCandidate(
-    Guid VariantId,
+    long VariantId,
     Uri ProductUrl,
     string Gtin,
     string? Size,
@@ -44,7 +44,7 @@ public sealed record PriceObservationCandidate(
     Uri SourceUrl,
     DateTimeOffset ObservedAt)
 {
-    public Guid? VariantId { get; init; }
+    public long? VariantId { get; init; }
 }
 
 public enum CrawlStatus
@@ -70,4 +70,9 @@ public interface IWebsiteCrawler
     string Key { get; }
 
     Task<CrawlResult> CrawlAsync(CrawlTarget target, CancellationToken cancellationToken);
+}
+
+public interface IPollingWebsiteCrawler : IWebsiteCrawler
+{
+    Task<CrawlResult> PollAsync(CrawlTarget target, VerifiedProductMatch match, CancellationToken cancellationToken);
 }

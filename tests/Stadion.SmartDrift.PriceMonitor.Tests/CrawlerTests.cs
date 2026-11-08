@@ -6,7 +6,7 @@ namespace Stadion.SmartDrift.PriceMonitor.Tests;
 
 public class CrawlerTests
 {
-    private static readonly CrawlTarget Target = new(Guid.NewGuid(), "Brand", "Product", "ABC", []);
+    private static readonly CrawlTarget Target = new(1, "Brand", "Product", "ABC", []);
 
     [Fact]
     public async Task RegisteredCrawlerReceivesTargetAndCancellationToken()

@@ -235,7 +235,7 @@ public static class PlatouSportProductParser
             [new ProductMatchCandidate(name, url, null, article) { MatchBasis = articleMatch ? "article-number" : "brand-name" }], []);
     }
 
-    private static PriceObservationCandidate? Offer(JsonElement product, Uri url, DateTimeOffset observedAt, Guid variantId)
+    private static PriceObservationCandidate? Offer(JsonElement product, Uri url, DateTimeOffset observedAt, long variantId)
     {
         if (!product.TryGetProperty("offers", out var offer))
             return null;

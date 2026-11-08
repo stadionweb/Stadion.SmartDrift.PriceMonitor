@@ -159,6 +159,37 @@ public class PlatouSportTests
     }
 
     [Fact]
+    public async Task DiscoveryContinuesForVariantsOnDifferentPages()
+    {
+        var fixture = Fixture("beta-sl-jacket.html");
+        var handler = new FixtureHandler
+        {
+            Unrelated = fixture.Replace("0623555782032", "0000000000000"),
+            Product = fixture.Replace("0623555782018", "0000000000001")
+        };
+        using var client = new HttpClient(handler);
+        var target = Target with { Variants = [Target.Variants[0], new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero)).CrawlAsync(target, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Succeeded, result.Status);
+        Assert.Equal(2, result.ProductMatches.Count);
+        Assert.Equal("/produkt/unrelated/", Assert.Single(result.VariantMatches, v => v.VariantId == VariantId).ProductUrl.AbsolutePath);
+        Assert.Equal("/produkt/item-123/", Assert.Single(result.VariantMatches, v => v.VariantId == XlVariantId).ProductUrl.AbsolutePath);
+        Assert.Equal(2, result.PriceObservations.Count);
+    }
+
+    [Fact]
+    public void MissingPriceForOneVariantKeepsTheOtherObservationAndIsIncomplete()
+    {
+        var target = Target with { Variants = [Target.Variants[0], new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
+        var html = Fixture("beta-sl-jacket.html").Replace("\"price\": \"4450.75\"", "\"price\": \"unknown\"");
+        var result = PlatouSportProductParser.Parse(html, ProductUrl, target, DateTimeOffset.UtcNow);
+        Assert.Equal(CrawlStatus.Incomplete, result.Status);
+        Assert.Single(result.ProductMatches);
+        Assert.Equal(2, result.VariantMatches.Count);
+        Assert.Equal(VariantId, Assert.Single(result.PriceObservations).VariantId);
+    }
+
+    [Fact]
     public void SitemapRejectsForeignOriginsAndDtds()
     {
         var index = PlatouSportCrawler.ParseSitemap(Fixture("sitemap-index.xml"), "sitemapindex", "sitemap");
@@ -278,6 +309,7 @@ public class PlatouSportTests
         public string? Robots { get; init; } = Fixture("robots.txt");
         public string Sitemap { get; init; } = Fixture("product-sitemap.xml");
         public string Unrelated { get; init; } = """<script type="application/ld+json">{"@type":"Product","name":"Other","gtin13":"1234567890123"}</script>""";
+        public string Product { get; init; } = Fixture("beta-sl-jacket.html");
         public bool StallBody { get; init; }
         public List<string> Paths { get; } = [];
         public List<string> Agents { get; } = [];
@@ -296,7 +328,7 @@ public class PlatouSportTests
                 "/sitemap_index.xml" => Fixture("sitemap-index.xml"),
                 "/product-sitemap26.xml" => Sitemap,
                 "/produkt/unrelated/" => Unrelated,
-                "/produkt/item-123/" => Fixture("beta-sl-jacket.html"),
+                "/produkt/item-123/" => Product,
                 _ => null
             };
             return Task.FromResult(body is null

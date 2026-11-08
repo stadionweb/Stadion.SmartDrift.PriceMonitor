@@ -89,6 +89,8 @@ public static class PlatouSportProductParser
             var name = Text(product, "name");
             if (string.IsNullOrWhiteSpace(name))
                 return new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Product name is missing." };
+            var candidate = new ProductMatchCandidate(name, url, null, Text(product, "mpn"))
+                { MatchBasis = "gtin", ExternalProductId = productId, ExternalSku = Text(product, "sku") };
 
             try
             {
@@ -106,7 +108,7 @@ public static class PlatouSportProductParser
                     if (string.IsNullOrWhiteSpace(targetVariant.Gtin)) continue;
                     var matching = items.Where(v => Text(v, "sku") == targetVariant.Gtin).ToArray();
                     if (matching.Length > 1 || target.Variants.Count(v => v.Gtin == targetVariant.Gtin) > 1)
-                        return new CrawlResult(CrawlStatus.Ambiguous, [], []) { Diagnostic = "Duplicate variant GTIN." };
+                        return new CrawlResult(CrawlStatus.Ambiguous, [candidate], []) { Diagnostic = "Duplicate variant GTIN." };
                     if (matching.Length == 0) continue;
                     var variation = matching[0];
                     var size = variation.TryGetProperty("attributes", out var attributes) ? Text(attributes, "attribute_pa_size") : null;
@@ -127,10 +129,9 @@ public static class PlatouSportProductParser
                 }
                 if (matches.Count == 0)
                     return new CrawlResult(items.Length == 0 || items.Any(v => string.IsNullOrWhiteSpace(Text(v, "sku")))
-                        ? CrawlStatus.Incomplete : CrawlStatus.NotFound, [], []);
+                        ? CrawlStatus.Incomplete : CrawlStatus.NotFound, [candidate], []);
                 return new CrawlResult(observations.Count == target.Variants.Count ? CrawlStatus.Succeeded : CrawlStatus.Incomplete,
-                    [new ProductMatchCandidate(name, url, null, Text(product, "mpn"))
-                        { MatchBasis = "gtin", ExternalProductId = productId, ExternalSku = Text(product, "sku") }], observations)
+                    [candidate], observations)
                 {
                     VariantMatches = matches,
                     Diagnostic = observations.Count == target.Variants.Count ? null : "Some target variants are unmatched or lack a priced offer."

@@ -17,7 +17,9 @@ Price Monitor Crawler
 
 The crawler is a separate executable service. Core owns small observation and crawler contracts and has no SQL, HTTP implementation, browser, website adapter or SmartDrift runtime dependency. Infrastructure is the future home for external-system concerns. The Worker uses the Generic Host, configuration, dependency injection and logging. Website adapters will implement `IWebsiteCrawler` with a stable unique key and accept a target and cancellation token. Different sites may need HTTP, search endpoints, structured product data, sitemaps, HTML parsing or, only if justified, browser automation. Concrete integrations should drive shared abstractions.
 
-The current host starts and stops once. It resolves crawler registrations but does not execute a selected crawler without real monitoring work; no website adapters exist. Keys are unique case-insensitively. Unknown keys and malformed selection return exit code 2. The registry exposes target execution and forwards cancellation for future callers.
+The host starts and stops once. The `platou-sport` adapter is registered; selection alone does not run it without monitoring work. An explicit control-target option runs the fixture target against the live website. Keys are unique case-insensitively. Unknown keys and malformed selection return exit code 2. The registry forwards targets and cancellation to adapters.
+
+Platou Sport discovery is bounded and sequential: robots.txt, product sitemap index entries, then product-page inspection. Exact GTIN results carry the input variant ID, while weaker matches are labeled as candidates and do not produce variant prices. The initial parser handles JSON-LD only; its synthetic product fixture is not evidence that the current live site exposes this format. Live validation is separate. Future polling must use a previously verified persisted match URL rather than rerun discovery; neither persistence nor polling is implemented.
 
 ## Matching and observations
 

@@ -45,6 +45,15 @@ public class PlatouSportTests
     }
 
     [Fact]
+    public void ConflictingVariantAttributesDoNotProduceAnExactObservation()
+    {
+        var html = Fixture("beta-sl-jacket.html").Replace("\"size\": \"M\"", "\"size\": \"S\"");
+        var result = PlatouSportProductParser.Parse(html, ProductUrl, Target, DateTimeOffset.UtcNow);
+        Assert.Equal("article-number", Assert.Single(result.ProductMatches).MatchBasis);
+        Assert.Empty(result.PriceObservations);
+    }
+
+    [Fact]
     public void MissingOrAmbiguousOffersDoNotInventPrices()
     {
         var html = Fixture("beta-sl-jacket.html").Replace("\"price\": \"4321.50\"", "\"price\": \"not a price\"");
@@ -52,6 +61,14 @@ public class PlatouSportTests
         Assert.Equal("gtin", Assert.Single(result.ProductMatches).MatchBasis);
         Assert.Equal(CrawlStatus.Incomplete, result.Status);
         Assert.Empty(result.PriceObservations);
+    }
+
+    [Fact]
+    public void UnsupportedPageIsNotReportedAsAnExhaustiveNonMatch()
+    {
+        var result = PlatouSportProductParser.Parse("<html></html>", ProductUrl, Target, DateTimeOffset.UtcNow);
+        Assert.Equal(CrawlStatus.Incomplete, result.Status);
+        Assert.Empty(result.ProductMatches);
     }
 
     [Fact]
@@ -155,7 +172,7 @@ public class PlatouSportTests
                 "/robots.txt" => Robots,
                 "/sitemap_index.xml" => Fixture("sitemap-index.xml"),
                 "/product-sitemap26.xml" => Fixture("product-sitemap.xml"),
-                "/produkt/unrelated/" => "<html></html>",
+                "/produkt/unrelated/" => """<script type="application/ld+json">{"@type":"Product","name":"Other","gtin13":"1234567890123"}</script>""",
                 "/produkt/item-123/" => Fixture("beta-sl-jacket.html"),
                 _ => null
             };

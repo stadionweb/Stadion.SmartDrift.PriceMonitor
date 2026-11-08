@@ -15,6 +15,7 @@ public static class PlatouSportProductParser
     public static CrawlResult Parse(string html, Uri sourceUrl, CrawlTarget target, DateTimeOffset observedAt)
     {
         CrawlResult? fallback = null;
+        var sawProduct = false;
         foreach (Match script in JsonLd.Matches(html))
         {
             try
@@ -22,6 +23,7 @@ public static class PlatouSportProductParser
                 using var document = JsonDocument.Parse(script.Groups[1].Value);
                 foreach (var product in Products(document.RootElement))
                 {
+                    sawProduct = true;
                     var result = MatchProduct(product, sourceUrl, target, observedAt);
                     if (result?.ProductMatches[0].MatchBasis == "gtin")
                         return result;
@@ -36,7 +38,9 @@ public static class PlatouSportProductParser
             }
         }
 
-        return fallback ?? new CrawlResult(CrawlStatus.NotFound, [], []);
+        return fallback ?? (sawProduct
+            ? new CrawlResult(CrawlStatus.NotFound, [], [])
+            : new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "No supported JSON-LD product data found." });
     }
 
     private static IEnumerable<JsonElement> Products(JsonElement element)
@@ -81,11 +85,15 @@ public static class PlatouSportProductParser
             var matches = target.Variants.Where(v => !string.IsNullOrWhiteSpace(v.Gtin) && v.Gtin == gtin).ToArray();
             if (matches.Length != 1)
                 continue;
+            var size = Text(variant, "size");
+            var color = Text(variant, "color");
+            if (Conflicts(size, matches[0].Size) || Conflicts(color, matches[0].Color))
+                continue;
 
             var match = new ProductMatchCandidate(name, url, gtin, Text(variant, "mpn") ?? Text(product, "mpn"))
             {
                 MatchBasis = "gtin", VariantId = matches[0].Id,
-                Size = Text(variant, "size"), Color = Text(variant, "color")
+                Size = size, Color = color
             };
             var observation = Offer(variant, url, observedAt, matches[0].Id);
             return new CrawlResult(observation is null ? CrawlStatus.Incomplete : CrawlStatus.Succeeded,
@@ -152,4 +160,7 @@ public static class PlatouSportProductParser
     private static bool EqualIdentity(string? left, string? right) =>
         !string.IsNullOrWhiteSpace(left) && !string.IsNullOrWhiteSpace(right) &&
         string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private static bool Conflicts(string? left, string? right) =>
+        !string.IsNullOrWhiteSpace(left) && !string.IsNullOrWhiteSpace(right) && !EqualIdentity(left, right);
 }

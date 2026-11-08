@@ -90,6 +90,7 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
                 if (!robots.Allows(url)) { truncated = true; continue; }
                 var result = PlatouSportProductParser.Parse(await Fetch(url), url, target, DateTimeOffset.UtcNow);
                 if (result.ProductMatches.FirstOrDefault()?.MatchBasis == "gtin") return result;
+                if (result.Status == CrawlStatus.Incomplete) truncated = true;
                 if (result.ProductMatches.Count > 0 && (fallback is null ||
                     result.ProductMatches[0].MatchBasis == "article-number"))
                     fallback = result;
@@ -98,7 +99,7 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
                 return fallback with { Status = truncated ? CrawlStatus.Incomplete : CrawlStatus.Succeeded,
                     Diagnostic = truncated ? "Search incomplete; candidate is not an exact GTIN match." : "Candidate is not an exact GTIN match." };
             return Result(truncated ? CrawlStatus.Incomplete : CrawlStatus.NotFound,
-                truncated ? "Discovery limit reached or product pages disallowed." : "No matching product found.");
+                truncated ? "Discovery limited, disallowed, or some pages lacked supported product data." : "No matching product found.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is HttpRequestException or IOException or XmlException or InvalidDataException or

@@ -30,4 +30,8 @@
     <ProjectReference Include="..\..\src\Stadion.SmartDrift.PriceMonitor.Crawler\Stadion.SmartDrift.PriceMonitor.Crawler.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="Fixtures/**/*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

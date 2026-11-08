@@ -9,7 +9,28 @@ public sealed record CrawlTarget(
     string? ArticleNumber,
     IReadOnlyList<CrawlVariant> Variants);
 
-public sealed record ProductMatchCandidate(string Name, Uri SourceUrl, string? Gtin, string? ArticleNumber);
+public sealed record ProductMatchCandidate(string Name, Uri SourceUrl, string? Gtin, string? ArticleNumber)
+{
+    public string? MatchBasis { get; init; }
+    public string? ExternalProductId { get; init; }
+    public string? ExternalSku { get; init; }
+}
+
+public enum VariantMatchMethod
+{
+    ExactGtin
+}
+
+public sealed record ProductVariantMatchCandidate(
+    Guid VariantId,
+    Uri ProductUrl,
+    string Gtin,
+    string? Size,
+    string? Color,
+    VariantMatchMethod MatchMethod)
+{
+    public string? ExternalVariationId { get; init; }
+}
 
 public sealed record PriceObservationCandidate(
     decimal? RegularPrice,
@@ -21,18 +42,28 @@ public sealed record PriceObservationCandidate(
     string? StockText,
     string? PromotionText,
     Uri SourceUrl,
-    DateTimeOffset ObservedAt);
+    DateTimeOffset ObservedAt)
+{
+    public Guid? VariantId { get; init; }
+}
 
 public enum CrawlStatus
 {
     Succeeded,
-    Failed
+    Failed,
+    NotFound,
+    Incomplete,
+    Ambiguous
 }
 
 public sealed record CrawlResult(
     CrawlStatus Status,
     IReadOnlyList<ProductMatchCandidate> ProductMatches,
-    IReadOnlyList<PriceObservationCandidate> PriceObservations);
+    IReadOnlyList<PriceObservationCandidate> PriceObservations)
+{
+    public string? Diagnostic { get; init; }
+    public IReadOnlyList<ProductVariantMatchCandidate> VariantMatches { get; init; } = [];
+}
 
 public interface IWebsiteCrawler
 {

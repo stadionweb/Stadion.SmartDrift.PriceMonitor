@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Stadion.SmartDrift.PriceMonitor.Core;
@@ -11,11 +12,19 @@ public static class PlatouSportProductParser
         """<script\b(?=[^>]*\btype\s*=\s*['"]application/ld\+json['"])[^>]*>(.*?)</script\s*>""",
         RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant,
         TimeSpan.FromSeconds(1));
+    private static readonly Regex Forms = new(
+        """<form\b(?:[^"'<>]|"[^"]*"|'[^']*')*>""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+    private static readonly Regex Attributes = new(
+        """(?:^|\s)(?<name>[a-zA-Z_:][\w:.-]*)\s*=\s*(?:"(?<value>[^"]*)"|'(?<value>[^']*)')""",
+        RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     public static CrawlResult Parse(string html, Uri sourceUrl, CrawlTarget target, DateTimeOffset observedAt)
     {
         if (!ValidTarget(target))
             return new CrawlResult(CrawlStatus.Failed, [], []) { Diagnostic = "Target variants must have distinct IDs and at least one variant is required." };
+        var woo = ParseWooCommerce(html, sourceUrl, target, observedAt);
+        if (woo is not null) return woo;
         CrawlResult? fallback = null;
         var sawProduct = false;
         var insufficientIdentity = false;
@@ -42,10 +51,105 @@ public static class PlatouSportProductParser
             }
         }
 
-        return fallback ?? (sawProduct && !insufficientIdentity
-            ? new CrawlResult(CrawlStatus.NotFound, [], [])
-            : new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Product data is missing or lacks variant GTINs." });
-    }
+            return fallback ?? (sawProduct && !insufficientIdentity
+                ? new CrawlResult(CrawlStatus.NotFound, [], [])
+                : new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Product data is missing or lacks variant GTINs." });
+        }
+
+        private static CrawlResult? ParseWooCommerce(string html, Uri url, CrawlTarget target, DateTimeOffset observedAt)
+        {
+            var forms = Forms.Matches(html).Cast<Match>()
+                .Select(form => Attributes.Matches(form.Value).Cast<Match>()
+                    .GroupBy(a => a.Groups["name"].Value, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => WebUtility.HtmlDecode(g.First().Groups["value"].Value), StringComparer.OrdinalIgnoreCase))
+                .Where(a => a.ContainsKey("data-product_variations")).ToArray();
+            if (forms.Length == 0) return null;
+            if (forms.Length != 1)
+                return new CrawlResult(CrawlStatus.Ambiguous, [], []) { Diagnostic = "Multiple variation forms found." };
+            var form = forms[0];
+            if (!form.TryGetValue("data-product_id", out var productId) || string.IsNullOrWhiteSpace(productId))
+                return new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Variation form lacks product ID." };
+
+            var products = new List<JsonElement>();
+            foreach (Match script in JsonLd.Matches(html))
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(script.Groups[1].Value);
+                    products.AddRange(Products(document.RootElement).Where(p =>
+                        Uri.TryCreate(Text(p, "url"), UriKind.Absolute, out var productUrl) && productUrl == url)
+                        .Select(p => p.Clone()));
+                }
+                catch (JsonException) { }
+            }
+            if (products.Count != 1)
+                return new CrawlResult(products.Count > 1 ? CrawlStatus.Ambiguous : CrawlStatus.Incomplete, [], [])
+                    { Diagnostic = "Could not uniquely associate JSON-LD product with variation form." };
+            var product = products[0];
+            var name = Text(product, "name");
+            if (string.IsNullOrWhiteSpace(name))
+                return new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Product name is missing." };
+
+            try
+            {
+                using var document = JsonDocument.Parse(form["data-product_variations"]);
+                if (document.RootElement.ValueKind != JsonValueKind.Array)
+                    return new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Variation payload is unavailable." };
+                var items = document.RootElement.EnumerateArray().ToArray();
+                if (items.Any(v => v.ValueKind != JsonValueKind.Object))
+                    return new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Malformed variation payload." };
+                var matches = new List<ProductVariantMatchCandidate>();
+                var observations = new List<PriceObservationCandidate>();
+                var currency = ProductCurrency(product);
+                foreach (var targetVariant in target.Variants)
+                {
+                    if (string.IsNullOrWhiteSpace(targetVariant.Gtin)) continue;
+                    var matching = items.Where(v => Text(v, "sku") == targetVariant.Gtin).ToArray();
+                    if (matching.Length > 1 || target.Variants.Count(v => v.Gtin == targetVariant.Gtin) > 1)
+                        return new CrawlResult(CrawlStatus.Ambiguous, [], []) { Diagnostic = "Duplicate variant GTIN." };
+                    if (matching.Length == 0) continue;
+                    var variation = matching[0];
+                    var size = variation.TryGetProperty("attributes", out var attributes) ? Text(attributes, "attribute_pa_size") : null;
+                    var color = variation.TryGetProperty("attributes", out attributes) ? Text(attributes, "attribute_pa_color") : null;
+                    if (Conflicts(size, targetVariant.Size) || Conflicts(color, targetVariant.Color)) continue;
+                    matches.Add(new ProductVariantMatchCandidate(targetVariant.Id, url, targetVariant.Gtin, size, color, VariantMatchMethod.ExactGtin)
+                        { ExternalVariationId = Text(variation, "variation_id") });
+                    if (decimal.TryParse(Text(variation, "display_price"), NumberStyles.AllowDecimalPoint,
+                        CultureInfo.InvariantCulture, out var price) && price >= 0 && currency is not null)
+                    {
+                        decimal? regular = decimal.TryParse(Text(variation, "display_regular_price"), NumberStyles.AllowDecimalPoint,
+                            CultureInfo.InvariantCulture, out var parsedRegular) && parsedRegular >= 0 ? parsedRegular : null;
+                        bool? stock = variation.TryGetProperty("is_in_stock", out var inStock) ?
+                            inStock.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null } : null;
+                        observations.Add(new PriceObservationCandidate(regular, price, null, null, currency, stock,
+                            null, null, url, observedAt) { VariantId = targetVariant.Id });
+                    }
+                }
+                if (matches.Count == 0)
+                    return new CrawlResult(items.Length == 0 || items.Any(v => string.IsNullOrWhiteSpace(Text(v, "sku")))
+                        ? CrawlStatus.Incomplete : CrawlStatus.NotFound, [], []);
+                return new CrawlResult(observations.Count == target.Variants.Count ? CrawlStatus.Succeeded : CrawlStatus.Incomplete,
+                    [new ProductMatchCandidate(name, url, null, Text(product, "mpn"))
+                        { MatchBasis = "gtin", ExternalProductId = productId, ExternalSku = Text(product, "sku") }], observations)
+                {
+                    VariantMatches = matches,
+                    Diagnostic = observations.Count == target.Variants.Count ? null : "Some target variants are unmatched or lack a priced offer."
+                };
+            }
+            catch (JsonException)
+            {
+                return new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Malformed variation payload." };
+            }
+        }
+
+        private static string? ProductCurrency(JsonElement product)
+        {
+            if (!product.TryGetProperty("offers", out var offers)) return null;
+            var items = offers.ValueKind == JsonValueKind.Array ? offers.EnumerateArray().ToArray() : [offers];
+            var currencies = items.Where(o => o.ValueKind == JsonValueKind.Object && IsType(o, "Offer"))
+                .Select(o => Text(o, "priceCurrency")).Where(c => !string.IsNullOrWhiteSpace(c)).Distinct(StringComparer.Ordinal).ToArray();
+            return currencies.Length == 1 ? currencies[0] : null;
+        }
 
     private static IEnumerable<JsonElement> Products(JsonElement element)
     {

@@ -96,6 +96,7 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
             {
                 if (!robots.Allows(url)) { truncated = true; continue; }
                 var result = PlatouSportProductParser.Parse(await Fetch(url), url, target, DateTimeOffset.UtcNow);
+                if (result.Status == CrawlStatus.Ambiguous) return result;
                 if (result.VariantMatches.Count > 0)
                 {
                     products.AddRange(result.ProductMatches);

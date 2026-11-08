@@ -12,6 +12,8 @@ public sealed record CrawlTarget(
 public sealed record ProductMatchCandidate(string Name, Uri SourceUrl, string? Gtin, string? ArticleNumber)
 {
     public string? MatchBasis { get; init; }
+    public string? ExternalProductId { get; init; }
+    public string? ExternalSku { get; init; }
 }
 
 public enum VariantMatchMethod
@@ -25,7 +27,10 @@ public sealed record ProductVariantMatchCandidate(
     string Gtin,
     string? Size,
     string? Color,
-    VariantMatchMethod MatchMethod);
+    VariantMatchMethod MatchMethod)
+{
+    public string? ExternalVariationId { get; init; }
+}
 
 public sealed record PriceObservationCandidate(
     decimal? RegularPrice,
@@ -47,7 +52,8 @@ public enum CrawlStatus
     Succeeded,
     Failed,
     NotFound,
-    Incomplete
+    Incomplete,
+    Ambiguous
 }
 
 public sealed record CrawlResult(

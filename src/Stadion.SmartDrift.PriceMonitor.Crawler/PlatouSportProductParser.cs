@@ -14,8 +14,11 @@ public static class PlatouSportProductParser
 
     public static CrawlResult Parse(string html, Uri sourceUrl, CrawlTarget target, DateTimeOffset observedAt)
     {
+        if (target.Variants.Count != 1)
+            return new CrawlResult(CrawlStatus.Failed, [], []) { Diagnostic = "This discovery spike requires exactly one target variant." };
         CrawlResult? fallback = null;
         var sawProduct = false;
+        var insufficientIdentity = false;
         foreach (Match script in JsonLd.Matches(html))
         {
             try
@@ -24,6 +27,7 @@ public static class PlatouSportProductParser
                 foreach (var product in Products(document.RootElement))
                 {
                     sawProduct = true;
+                    insufficientIdentity |= !HasVariantGtins(product);
                     var result = MatchProduct(product, sourceUrl, target, observedAt);
                     if (result?.ProductMatches[0].MatchBasis == "gtin")
                         return result;
@@ -38,9 +42,9 @@ public static class PlatouSportProductParser
             }
         }
 
-        return fallback ?? (sawProduct
+        return fallback ?? (sawProduct && !insufficientIdentity
             ? new CrawlResult(CrawlStatus.NotFound, [], [])
-            : new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "No supported JSON-LD product data found." });
+            : new CrawlResult(CrawlStatus.Incomplete, [], []) { Diagnostic = "Product data is missing or lacks variant GTINs." });
     }
 
     private static IEnumerable<JsonElement> Products(JsonElement element)
@@ -144,6 +148,24 @@ public static class PlatouSportProductParser
         return value.ValueKind == JsonValueKind.String ? value.GetString() == type :
             value.ValueKind == JsonValueKind.Array && value.EnumerateArray().Any(v => v.ValueKind == JsonValueKind.String && v.GetString() == type);
     }
+
+    private static bool HasVariantGtins(JsonElement product)
+    {
+        if (product.TryGetProperty("hasVariant", out var variants))
+        {
+            if (variants.ValueKind == JsonValueKind.Array)
+            {
+                var items = variants.EnumerateArray().ToArray();
+                return items.Length > 0 && items.All(HasGtin);
+            }
+            return HasGtin(variants);
+        }
+        return HasGtin(product);
+    }
+
+    private static bool HasGtin(JsonElement product) =>
+        !string.IsNullOrWhiteSpace(Text(product, "gtin") ?? Text(product, "gtin13") ?? Text(product, "gtin14") ??
+            Text(product, "gtin12") ?? Text(product, "gtin8"));
 
     private static string? Text(JsonElement element, string property)
     {

@@ -69,6 +69,19 @@ public class PlatouSportTests
         var result = PlatouSportProductParser.Parse("<html></html>", ProductUrl, Target, DateTimeOffset.UtcNow);
         Assert.Equal(CrawlStatus.Incomplete, result.Status);
         Assert.Empty(result.ProductMatches);
+        result = PlatouSportProductParser.Parse(
+            """<script type="application/ld+json">{"@type":"Product","name":"Other"}</script>""",
+            ProductUrl, Target, DateTimeOffset.UtcNow);
+        Assert.Equal(CrawlStatus.Incomplete, result.Status);
+    }
+
+    [Fact]
+    public async Task MultipleVariantsAreRejectedRatherThanSilentlyDropped()
+    {
+        using var client = new HttpClient(new FixtureHandler());
+        var target = Target with { Variants = [Target.Variants[0], new CrawlVariant(Guid.NewGuid(), "123", null, null, null)] };
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero)).CrawlAsync(target, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Failed, result.Status);
     }
 
     [Fact]
@@ -103,6 +116,17 @@ public class PlatouSportTests
             .CrawlAsync(Target, CancellationToken.None);
         Assert.Equal(CrawlStatus.Incomplete, result.Status);
         Assert.Empty(result.PriceObservations);
+    }
+
+    [Fact]
+    public async Task DiscoveryContinuesPastUnpricedExactMatch()
+    {
+        var handler = new FixtureHandler { Unrelated = Fixture("beta-sl-jacket.html").Replace("\"price\": \"4321.50\"", "\"price\": \"unknown\"") };
+        using var client = new HttpClient(handler);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero)).CrawlAsync(Target, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Succeeded, result.Status);
+        Assert.Equal(4321.50m, Assert.Single(result.PriceObservations).CurrentPrice);
+        Assert.Contains("/produkt/item-123/", handler.Paths);
     }
 
     [Fact]
@@ -145,6 +169,26 @@ public class PlatouSportTests
     }
 
     [Fact]
+    public async Task RobotsMatchesUnicodeAndPercentEncodedPaths()
+    {
+        var handler = new FixtureHandler { Robots = "User-agent: *\nDisallow: /produkt/å/\n",
+            Sitemap = Fixture("product-sitemap.xml").Replace("/produkt/unrelated/", "/produkt/%C3%A5/") };
+        using var client = new HttpClient(handler);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero)).CrawlAsync(Target, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Succeeded, result.Status);
+        Assert.DoesNotContain("/produkt/%C3%A5/", handler.Paths);
+    }
+
+    [Fact]
+    public async Task ResponseBodyIsSubjectToTimeout()
+    {
+        using var client = new HttpClient(new FixtureHandler { StallBody = true });
+        var result = await new PlatouSportCrawler(client,
+            new(RequestInterval: TimeSpan.Zero, RequestTimeout: TimeSpan.FromMilliseconds(50))).CrawlAsync(Target, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Failed, result.Status);
+    }
+
+    [Fact]
     public async Task RegistryIncludesPlatouSport()
     {
         using var provider = new ServiceCollection().AddCrawlerRuntime().BuildServiceProvider();
@@ -158,6 +202,9 @@ public class PlatouSportTests
     private sealed class FixtureHandler : HttpMessageHandler
     {
         public string? Robots { get; init; } = Fixture("robots.txt");
+        public string Sitemap { get; init; } = Fixture("product-sitemap.xml");
+        public string Unrelated { get; init; } = """<script type="application/ld+json">{"@type":"Product","name":"Other","gtin13":"1234567890123"}</script>""";
+        public bool StallBody { get; init; }
         public List<string> Paths { get; } = [];
         public List<string> Agents { get; } = [];
 
@@ -167,12 +214,14 @@ public class PlatouSportTests
             var path = request.RequestUri!.AbsolutePath;
             Paths.Add(path);
             Agents.Add(request.Headers.UserAgent.ToString());
+            if (StallBody)
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new StalledStream()) });
             var body = path switch
             {
                 "/robots.txt" => Robots,
                 "/sitemap_index.xml" => Fixture("sitemap-index.xml"),
-                "/product-sitemap26.xml" => Fixture("product-sitemap.xml"),
-                "/produkt/unrelated/" => """<script type="application/ld+json">{"@type":"Product","name":"Other","gtin13":"1234567890123"}</script>""",
+                "/product-sitemap26.xml" => Sitemap,
+                "/produkt/unrelated/" => Unrelated,
                 "/produkt/item-123/" => Fixture("beta-sl-jacket.html"),
                 _ => null
             };
@@ -180,5 +229,24 @@ public class PlatouSportTests
                 ? new HttpResponseMessage(HttpStatusCode.NotFound)
                 : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8) });
         }
+    }
+
+    private sealed class StalledStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

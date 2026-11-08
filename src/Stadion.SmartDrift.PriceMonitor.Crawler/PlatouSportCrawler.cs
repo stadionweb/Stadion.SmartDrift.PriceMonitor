@@ -9,7 +9,7 @@ using Stadion.SmartDrift.PriceMonitor.Core;
 namespace Stadion.SmartDrift.PriceMonitor.Crawler;
 
 public sealed record PlatouSportOptions(int MaxSitemaps = 30, int MaxProductPages = 500, int MaxResponseBytes = 2_000_000,
-    TimeSpan? RequestInterval = null);
+    TimeSpan? RequestInterval = null, TimeSpan? RequestTimeout = null);
 
 public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? options = null) : IWebsiteCrawler
 {
@@ -24,8 +24,10 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
     public async Task<CrawlResult> CrawlAsync(CrawlTarget target, CancellationToken cancellationToken)
     {
         if (settings.MaxSitemaps <= 0 || settings.MaxProductPages <= 0 || settings.MaxResponseBytes <= 0 ||
-            settings.RequestInterval < TimeSpan.Zero)
+            settings.RequestInterval < TimeSpan.Zero || settings.RequestTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options));
+        if (target.Variants.Count != 1)
+            return Result(CrawlStatus.Failed, "This discovery spike requires exactly one target variant.");
 
         await gate.WaitAsync(cancellationToken);
         try
@@ -39,17 +41,19 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
                     if (remaining > TimeSpan.Zero) await Task.Delay(remaining, cancellationToken);
                 }
                 lastRequest = DateTimeOffset.UtcNow;
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(settings.RequestTimeout ?? TimeSpan.FromSeconds(20));
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
                 request.Headers.UserAgent.ParseAdd($"{Agent}/1.0");
-                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
                 response.EnsureSuccessStatusCode();
                 if (response.Content.Headers.ContentLength > settings.MaxResponseBytes)
                     throw new InvalidDataException("Response exceeds the size limit.");
-                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
                 using var buffer = new MemoryStream();
                 var bytes = new byte[8192];
                 int count;
-                while ((count = await stream.ReadAsync(bytes, cancellationToken)) > 0)
+                while ((count = await stream.ReadAsync(bytes, timeout.Token)) > 0)
                 {
                     if (buffer.Length + count > settings.MaxResponseBytes)
                         throw new InvalidDataException("Response exceeds the size limit.");
@@ -67,6 +71,7 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
             if (sitemaps.Count == 0) return Result(CrawlStatus.Failed, "No product sitemaps found.");
 
             CrawlResult? fallback = null;
+            CrawlResult? unpricedExact = null;
             var pages = new HashSet<Uri>();
             var truncated = sitemaps.Count > settings.MaxSitemaps;
             foreach (var sitemap in sitemaps.Take(settings.MaxSitemaps))
@@ -89,21 +94,27 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
             {
                 if (!robots.Allows(url)) { truncated = true; continue; }
                 var result = PlatouSportProductParser.Parse(await Fetch(url), url, target, DateTimeOffset.UtcNow);
-                if (result.ProductMatches.FirstOrDefault()?.MatchBasis == "gtin") return result;
+                if (result.ProductMatches.FirstOrDefault()?.MatchBasis == "gtin")
+                {
+                    if (result.PriceObservations.Count > 0) return result;
+                    unpricedExact ??= result;
+                    continue;
+                }
                 if (result.Status == CrawlStatus.Incomplete) truncated = true;
                 if (result.ProductMatches.Count > 0 && (fallback is null ||
                     result.ProductMatches[0].MatchBasis == "article-number"))
                     fallback = result;
             }
+            if (unpricedExact is not null) return unpricedExact;
             if (fallback is not null)
-                return fallback with { Status = truncated ? CrawlStatus.Incomplete : CrawlStatus.Succeeded,
-                    Diagnostic = truncated ? "Search incomplete; candidate is not an exact GTIN match." : "Candidate is not an exact GTIN match." };
+                return fallback with { Status = CrawlStatus.Incomplete,
+                    Diagnostic = "Candidate is not an exact GTIN match." };
             return Result(truncated ? CrawlStatus.Incomplete : CrawlStatus.NotFound,
                 truncated ? "Discovery limited, disallowed, or some pages lacked supported product data." : "No matching product found.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is HttpRequestException or IOException or XmlException or InvalidDataException or
-            TaskCanceledException or RegexMatchTimeoutException)
+            OperationCanceledException or RegexMatchTimeoutException)
         {
             return Result(CrawlStatus.Failed, $"Platou Sport discovery failed: {ex.Message}");
         }
@@ -183,13 +194,40 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
 
         public bool Allows(Uri uri)
         {
-            var path = uri.PathAndQuery;
+            var path = Normalize(uri.PathAndQuery);
             var matching = rules.Where(r => Regex.IsMatch(path,
-                "^" + Regex.Escape(r.Pattern).Replace(@"\*", ".*").Replace(@"\$", "$"),
+                "^" + Regex.Escape(Normalize(r.Pattern)).Replace(@"\*", ".*").Replace(@"\$", "$"),
                 RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)))
-                .OrderByDescending(r => r.Pattern.Replace("*", "").TrimEnd('$').Length)
+                .OrderByDescending(r => Normalize(r.Pattern).Replace("*", "").TrimEnd('$').Length)
                 .ThenByDescending(r => r.Allow).FirstOrDefault();
             return matching == default || matching.Allow;
+        }
+
+        private static string Normalize(string value)
+        {
+            var result = new StringBuilder();
+            for (var i = 0; i < value.Length;)
+            {
+                if (value[i] == '%' && i + 2 < value.Length &&
+                    byte.TryParse(value.AsSpan(i + 1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var b))
+                {
+                    if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+                        (b >= '0' && b <= '9') || b is (byte)'-' or (byte)'.' or (byte)'_' or (byte)'~')
+                        result.Append((char)b);
+                    else
+                        result.Append('%').Append(b.ToString("X2", CultureInfo.InvariantCulture));
+                    i += 3;
+                }
+                else if (value[i] > 127)
+                {
+                    var length = char.IsHighSurrogate(value[i]) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]) ? 2 : 1;
+                    foreach (var octet in Encoding.UTF8.GetBytes(value.Substring(i, length)))
+                        result.Append('%').Append(octet.ToString("X2", CultureInfo.InvariantCulture));
+                    i += length;
+                }
+                else result.Append(value[i++]);
+            }
+            return result.ToString();
         }
     }
 }

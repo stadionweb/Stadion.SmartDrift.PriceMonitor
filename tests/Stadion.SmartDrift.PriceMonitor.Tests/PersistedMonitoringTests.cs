@@ -9,10 +9,16 @@ public class PersistedMonitoringTests
     private static readonly MonitoringWorkItem Work = new(2, 2, 1, "platou-sport",
         new CrawlTarget(35148, "ArcTeryx", "Beta SL Jacket M", "X000010552",
             [new CrawlVariant(54618, "0623555782018", null, "M", null)]));
+    private static readonly MonitoringWorkItem XlWork = Work with
+    {
+        Target = Work.Target with { Variants = [new CrawlVariant(54620, "0623555782032", null, "XL", null)] }
+    };
 
-    private static CrawlResult Result() => PlatouSportProductParser.Parse(
-        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "PlatouSport", "captured-product-excerpt.html"))
-            .Replace("5999", "6123"), Url, Work.Target, new DateTimeOffset(2026, 11, 8, 12, 0, 0, TimeSpan.Zero));
+    private static CrawlResult Result(CrawlTarget? target = null, string? html = null) =>
+        PlatouSportProductParser.Parse(html ??
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "PlatouSport", "captured-product-excerpt.html"))
+                .Replace("5999", "6123"), Url, target ?? Work.Target,
+            new DateTimeOffset(2026, 11, 8, 12, 0, 0, TimeSpan.Zero));
 
     [Fact]
     public async Task RealIdentitiesAndParsedFactsReachPersistenceAndRerunUsesPolling()
@@ -45,6 +51,72 @@ public class PersistedMonitoringTests
         Assert.Equal(Url, observation.SourceUrl);
         Assert.Equal(new DateTimeOffset(2026, 11, 8, 12, 0, 0, TimeSpan.Zero), observation.ObservedAt);
         Assert.All(runs.Completed, s => { Assert.Equal(1, s.Requested); Assert.Equal(1, s.Succeeded); Assert.Equal(0, s.Failed); });
+    }
+
+    [Fact]
+    public async Task VerifiedProductQualifiesAndReusesNewVariantWithoutDiscovery()
+    {
+        var monitoring = new TestMonitoring
+        {
+            WorkItem = XlWork,
+            Match = new(7, "392833", Url, [new(54618, "392835", "0623555782018")])
+        };
+        var crawler = new TestCrawler(Result(XlWork.Target));
+        var runs = new TestRuns();
+        var runner = new PersistedMonitoringRunner(monitoring, runs, new CrawlerRegistry([crawler]));
+
+        var first = await runner.RunAsync(new(2, "0623555782032"), CancellationToken.None);
+        var firstMatch = Assert.Single(monitoring.SavedResult!.VariantMatches);
+        Assert.Equal("Found", Assert.Single(first.Outcomes).Code);
+        Assert.Equal(1, first.ProductMatchesReused);
+        Assert.Equal(1, first.VariantMatchesCreated);
+        Assert.Equal(1, first.ObservationsWritten);
+        Assert.Equal("0623555782032", firstMatch.Gtin);
+        Assert.Equal("392837", firstMatch.ExternalVariationId);
+        Assert.Equal("xl", firstMatch.Size);
+        var firstObservation = Assert.Single(monitoring.SavedResult.PriceObservations);
+        Assert.Equal(6123m, firstObservation.CurrentPrice);
+        Assert.Equal("NOK", firstObservation.CurrencyCode);
+        Assert.True(firstObservation.InStock);
+        Assert.Equal(Url, firstObservation.SourceUrl);
+
+        var second = await runner.RunAsync(new(2, "0623555782032"), CancellationToken.None);
+        Assert.Equal("Succeeded", second.Status);
+        Assert.Equal(1, second.ProductMatchesReused);
+        Assert.Equal(1, second.VariantMatchesReused);
+        Assert.Equal(1, second.ObservationsWritten);
+        Assert.Equal(0, crawler.DiscoveryCalls);
+        Assert.Equal(2, crawler.PollCalls);
+        Assert.Equal(2, monitoring.PersistCalls);
+        Assert.Equal(2, runs.Completed.Count);
+    }
+
+    [Fact]
+    public async Task MissingVariantAndAmbiguousGtinNeverPersistUnderVerifiedProduct()
+    {
+        var baseHtml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "PlatouSport", "captured-product-excerpt.html"));
+        foreach (var (html, expected) in new[]
+        {
+            (baseHtml.Replace("0623555782032", "0623555782017"), "NoMatch"),
+            (baseHtml.Replace("0623555782018", "0623555782032"), "Ambiguous")
+        })
+        {
+            var monitoring = new TestMonitoring
+            {
+                WorkItem = XlWork,
+                Match = new(7, "392833", Url, [new(54618, "392835", "0623555782018")])
+            };
+            var runs = new TestRuns();
+            var crawler = new TestCrawler(Result(XlWork.Target, html));
+            var summary = await new PersistedMonitoringRunner(monitoring, runs, new CrawlerRegistry([crawler]))
+                .RunAsync(new(2, "0623555782032"), CancellationToken.None);
+
+            Assert.Equal(expected, Assert.Single(summary.Outcomes).Code);
+            Assert.Equal("SucceededWithWarnings", summary.Status);
+            Assert.Equal(0, monitoring.PersistCalls);
+            Assert.Null(monitoring.SavedResult);
+            Assert.Equal(0, summary.ObservationsWritten);
+        }
     }
 
     [Theory]
@@ -223,11 +295,20 @@ public class PersistedMonitoringTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (ThrowOnPersist) throw new IOException("fixture persistence fault");
+            var existing = Match;
+            var createdVariants = result.VariantMatches.Count(v =>
+                existing is null || existing.Variants.All(m => m.VariantId != v.VariantId));
             PersistCalls++;
             SavedWork = work;
             SavedResult = result;
-            return Task.FromResult(new PersistedTargetCounts(Match is null ? 1 : 0, Match is null ? 0 : 1,
-                Match is null ? 1 : 0, Match is null ? 0 : 1, 1));
+            if (existing is not null)
+                Match = existing with
+                {
+                    Variants = existing.Variants.Concat(result.VariantMatches.Select(v =>
+                        new VerifiedVariantMatch(v.VariantId, v.ExternalVariationId, v.Gtin))).ToArray()
+                };
+            return Task.FromResult(new PersistedTargetCounts(existing is null ? 1 : 0, existing is null ? 0 : 1,
+                createdVariants, result.VariantMatches.Count - createdVariants, result.PriceObservations.Count));
         }
     }
 

@@ -91,6 +91,23 @@ public sealed class SqlPersistenceTests
         Parameter(db.Commands[0], "@WebsiteId", 1, DbType.Int32);
     }
 
+    [Fact]
+    public async Task VerifiedProductMatchIsReturnedWhenSelectedVariantHasNotBeenMatched()
+    {
+        var db = new ScriptedConnection();
+        db.Responses.Enqueue(MatchTable("Matched", "ExactGtin", ObservedAt.UtcDateTime, ProductUrl.AbsoluteUri));
+        var xlWork = Work with
+        {
+            Target = Work.Target with { Variants = [new CrawlVariant(54620, "0623555782032", null, "XL", null)] }
+        };
+
+        var match = await new SqlMonitoringStore(() => db).ReadVerifiedMatchAsync(xlWork, default);
+
+        Assert.NotNull(match);
+        Assert.Equal("392833", match.ExternalProductId);
+        Assert.Empty(match.Variants);
+    }
+
     [Theory]
     [InlineData("Candidate", "ExactGtin", true, "https://example.test/product")]
     [InlineData("Matched", "Fuzzy", true, "https://example.test/product")]

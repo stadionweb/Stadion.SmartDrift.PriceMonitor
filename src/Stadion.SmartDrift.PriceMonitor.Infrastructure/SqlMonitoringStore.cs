@@ -94,8 +94,6 @@ public sealed class SqlMonitoringStore : IMonitoringStore
                 throw new InvalidDataException("Existing variant match requires qualification; automatic reassignment is prohibited.");
             variants.Add(new VerifiedVariantMatch(expected.Id, SqlStore.Text(reader, 7), SqlStore.Text(reader, 8)));
         }
-        if (match is not null && work.Target.Variants.Any(v => variants.All(m => m.VariantId != v.Id)))
-            throw new InvalidDataException("Existing product match lacks a verified selected variant and requires qualification.");
         return match;
     }
 

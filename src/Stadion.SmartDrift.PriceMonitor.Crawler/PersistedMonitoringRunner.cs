@@ -74,7 +74,7 @@ public sealed class PersistedMonitoringRunner(
                 if (crawler is not IPollingWebsiteCrawler polling)
                     return new(work.TargetId, "RequiresRequalification", "Adapter cannot verify the persisted match.");
                 result = await polling.PollAsync(work.Target, persisted, cancellationToken);
-                if (result.Status != CrawlStatus.Succeeded)
+                if (result.Status == CrawlStatus.Failed)
                     return new(work.TargetId, "RequiresRequalification", result.Diagnostic ?? "Persisted identity could not be verified.");
             }
             else

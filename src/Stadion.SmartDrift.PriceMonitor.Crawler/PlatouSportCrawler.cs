@@ -78,15 +78,22 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
                 if (!robots.Allows(match.ProductUrl))
                     return Result(CrawlStatus.Failed, "RequiresRequalification: persisted product URL is disallowed by robots.txt.");
                 var polled = PlatouSportProductParser.Parse(await Fetch(match.ProductUrl), match.ProductUrl, target, DateTimeOffset.UtcNow);
-                if (polled.Status != CrawlStatus.Succeeded || polled.ProductMatches.Count != 1 ||
+                if (polled.ProductMatches.Count != 1 ||
                     polled.ProductMatches[0].ExternalProductId != match.ExternalProductId ||
-                    polled.ProductMatches[0].SourceUrl != match.ProductUrl ||
+                    polled.ProductMatches[0].SourceUrl != match.ProductUrl)
+                    return Result(CrawlStatus.Failed, "RequiresRequalification: persisted product identity is no longer verified.");
+                if (polled.Status != CrawlStatus.Succeeded)
+                    return polled;
+                if (
                     target.Variants.Any(input =>
                     {
                         var expected = match.Variants.Where(v => v.VariantId == input.Id).ToArray();
                         var actual = polled.VariantMatches.Where(v => v.VariantId == input.Id).ToArray();
-                        return expected.Length != 1 || actual.Length != 1 || expected[0].Gtin != actual[0].Gtin ||
-                            expected[0].Gtin != input.Gtin?.Trim() || expected[0].ExternalVariantId != actual[0].ExternalVariationId;
+                        return expected.Length > 1 || actual.Length != 1 ||
+                            actual[0].Gtin != input.Gtin?.Trim() ||
+                            expected.Length == 1 && (expected[0].Gtin != actual[0].Gtin ||
+                                expected[0].Gtin != input.Gtin?.Trim() ||
+                                expected[0].ExternalVariantId != actual[0].ExternalVariationId);
                     }))
                     return Result(CrawlStatus.Failed, "RequiresRequalification: persisted product/variant identity is no longer present or priced unambiguously.");
                 return polled;
@@ -134,7 +141,7 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
                     continue;
                 }
                 if (result.Status == CrawlStatus.Incomplete) truncated = true;
-                if (result.ProductMatches.Count > 0 && (fallback is null ||
+                if (result.Status != CrawlStatus.NotFound && result.ProductMatches.Count > 0 && (fallback is null ||
                     result.ProductMatches[0].MatchBasis == "article-number"))
                     fallback = result;
             }

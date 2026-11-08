@@ -64,7 +64,8 @@ No confidence, price type or content hash is invented from adapter data.
 
 1. Start an integration run and read bounded work; close the SQL connection.
 2. With no existing match, discover externally. With a usable match, poll its persisted URL
-   and verify the expected product/variants, rather than rescan all sitemaps.
+   and verify the product identity. Preserve already verified variants and qualify any missing
+   selected variant by exact GTIN on that page; do not rescan sitemaps for another size.
 3. Validate the complete crawl result with `MonitoringResultValidator.Validate` **before opening SQL**.
    Every selected variant must have one exact identity match and one valid priced observation.
 4. Open one short serializable target transaction, recheck target/subscription/product/website and selected
@@ -88,11 +89,12 @@ Each new explicit successful run may append a new observation even if price/cont
 There is no observation deduplication or new unique constraint; old observations are never updated.
 
 An existing noncanonical/unverified match, missing external product identity, broken/unsafe URL,
-missing selected verified variant or
-GTIN mismatch is **not treated as absence**: the store throws a qualification-required error.
-These conditions raise `InvalidDataException` for the runner's `RequiresRequalification` outcome.
-This preserves stale identities and avoids blind rediscovery/replacement. Failed, ambiguous,
-incomplete or unmatched crawl results cannot create accepted matches or observations.
+or conflicting persisted GTIN is **not treated as absence**: the store throws a
+qualification-required error. These conditions raise `InvalidDataException` for the runner's
+`RequiresRequalification` outcome. A missing selected variant is qualified only against the
+verified persisted product URL; absent or ambiguous exact-GTIN evidence cannot create a match or
+observation. This preserves stale identities and avoids blind rediscovery/replacement. Failed,
+ambiguous, incomplete or unmatched crawl results cannot create accepted matches or observations.
 SQL failures and cancellation roll back target writes; rollback uses a noncancelled cleanup token.
 Normal open/read/write/commit operations forward the caller token. This is not a distributed
 transaction: integration reporting failure cannot undo already committed historical observations.

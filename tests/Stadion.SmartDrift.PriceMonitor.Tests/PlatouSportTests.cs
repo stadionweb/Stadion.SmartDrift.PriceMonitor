@@ -359,6 +359,26 @@ public class PlatouSportTests
     }
 
     [Fact]
+    public async Task DiscoveryDoesNotUseUnmatchedWooCommerceProductAsFallback()
+    {
+        using var client = new HttpClient(new FixtureHandler
+        {
+            Product = Fixture("captured-product-excerpt.html").Replace(CapturedUrl.ToString(), ProductUrl.ToString())
+        });
+        var target = Target with
+        {
+            Variants = [new CrawlVariant(VariantId, "0000000000000", null, null, null)]
+        };
+
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero))
+            .CrawlAsync(target, CancellationToken.None);
+
+        Assert.Equal(CrawlStatus.NotFound, result.Status);
+        Assert.Empty(result.VariantMatches);
+        Assert.Empty(result.PriceObservations);
+    }
+
+    [Fact]
     public async Task RobotsFailureIsNotTreatedAsPermission()
     {
         using var client = new HttpClient(new FixtureHandler { Robots = null });
@@ -407,6 +427,74 @@ public class PlatouSportTests
             .PollAsync(Target, match, CancellationToken.None);
         Assert.Equal(CrawlStatus.Succeeded, result.Status);
         Assert.Equal(6123m, Assert.Single(result.PriceObservations).CurrentPrice);
+        Assert.Equal(new[] { "/robots.txt", CapturedUrl.AbsolutePath }, handler.Paths);
+    }
+
+    [Fact]
+    public async Task PollingQualifiesMissingVariantByExactGtinWithoutSitemaps()
+    {
+        var handler = new FixtureHandler { Product = Fixture("captured-product-excerpt.html").Replace("5999", "6123") };
+        using var client = new HttpClient(handler);
+        var target = Target with { Variants = [new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
+        var match = new VerifiedProductMatch(7, "392833", CapturedUrl, [new(VariantId, "392835", "0623555782018")]);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(target, match, CancellationToken.None);
+
+        Assert.Equal(CrawlStatus.Succeeded, result.Status);
+        Assert.Equal("392833", Assert.Single(result.ProductMatches).ExternalProductId);
+        var variant = Assert.Single(result.VariantMatches);
+        Assert.Equal((XlVariantId, "0623555782032", "xl", "392837", VariantMatchMethod.ExactGtin),
+            (variant.VariantId, variant.Gtin, variant.Size, variant.ExternalVariationId, variant.MatchMethod));
+        var observation = Assert.Single(result.PriceObservations);
+        Assert.Equal((6123m, "NOK", true, CapturedUrl), (observation.CurrentPrice, observation.CurrencyCode,
+            observation.InStock, observation.SourceUrl));
+        Assert.Equal(new[] { "/robots.txt", CapturedUrl.AbsolutePath }, handler.Paths);
+    }
+
+    [Fact]
+    public async Task PollingReportsNoMatchAndAmbiguityForVerifiedProduct()
+    {
+        var missingHandler = new FixtureHandler { Product = Fixture("captured-product-excerpt.html") };
+        using var missingClient = new HttpClient(missingHandler);
+        var missingTarget = Target with { Variants = [new CrawlVariant(XlVariantId, "0000000000000", null, "XL", "Black")] };
+        var match = new VerifiedProductMatch(7, "392833", CapturedUrl, []);
+        var missing = await new PlatouSportCrawler(missingClient, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(missingTarget, match, CancellationToken.None);
+        Assert.Equal(CrawlStatus.NotFound, missing.Status);
+        Assert.Equal("392833", Assert.Single(missing.ProductMatches).ExternalProductId);
+        Assert.Empty(missing.VariantMatches);
+        Assert.Empty(missing.PriceObservations);
+        Assert.Equal(new[] { "/robots.txt", CapturedUrl.AbsolutePath }, missingHandler.Paths);
+
+        var ambiguousHandler = new FixtureHandler
+        {
+            Product = Fixture("captured-product-excerpt.html").Replace("0623555782018", "0623555782032")
+        };
+        using var ambiguousClient = new HttpClient(ambiguousHandler);
+        var xlTarget = Target with { Variants = [new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
+        var ambiguous = await new PlatouSportCrawler(ambiguousClient, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(xlTarget, match, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Ambiguous, ambiguous.Status);
+        Assert.Equal("392833", Assert.Single(ambiguous.ProductMatches).ExternalProductId);
+        Assert.Empty(ambiguous.VariantMatches);
+        Assert.Empty(ambiguous.PriceObservations);
+        Assert.Equal(new[] { "/robots.txt", CapturedUrl.AbsolutePath }, ambiguousHandler.Paths);
+    }
+
+    [Fact]
+    public async Task PollingRejectsStaleProductForMissingVariantWithoutSitemapDiscovery()
+    {
+        var handler = new FixtureHandler { Product = Fixture("captured-product-excerpt.html") };
+        using var client = new HttpClient(handler);
+        var target = Target with { Variants = [new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
+        var match = new VerifiedProductMatch(7, "stale-product", CapturedUrl, [new(VariantId, "392835", "0623555782018")]);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(target, match, CancellationToken.None);
+
+        Assert.Equal(CrawlStatus.Failed, result.Status);
+        Assert.Contains("RequiresRequalification", result.Diagnostic);
+        Assert.Empty(result.VariantMatches);
+        Assert.Empty(result.PriceObservations);
         Assert.Equal(new[] { "/robots.txt", CapturedUrl.AbsolutePath }, handler.Paths);
     }
 

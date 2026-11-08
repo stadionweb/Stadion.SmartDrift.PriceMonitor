@@ -83,7 +83,11 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
                     polled.ProductMatches[0].SourceUrl != match.ProductUrl)
                     return Result(CrawlStatus.Failed, "RequiresRequalification: persisted product identity is no longer verified.");
                 if (polled.Status != CrawlStatus.Succeeded)
+                {
+                    if (target.Variants.Any(input => match.Variants.Any(v => v.VariantId == input.Id)))
+                        return Result(CrawlStatus.Failed, "RequiresRequalification: a previously verified selected variant is no longer present or priced.");
                     return polled;
+                }
                 if (
                     target.Variants.Any(input =>
                     {

@@ -515,6 +515,23 @@ public class PlatouSportTests
         Assert.DoesNotContain(handler.Paths, p => p.Contains("sitemap"));
     }
 
+    [Fact]
+    public async Task PollingRequiresRequalificationWhenKnownVariantDisappears()
+    {
+        var handler = new FixtureHandler
+        {
+            Product = Fixture("captured-product-excerpt.html").Replace("0623555782018", "0000000000000")
+        };
+        using var client = new HttpClient(handler);
+        var match = new VerifiedProductMatch(7, "392833", CapturedUrl, [new(VariantId, "392835", "0623555782018")]);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(Target, match, CancellationToken.None);
+
+        Assert.Equal(CrawlStatus.Failed, result.Status);
+        Assert.Contains("RequiresRequalification", result.Diagnostic);
+        Assert.Empty(result.PriceObservations);
+    }
+
     [Theory]
     [InlineData("https://example.org/produkt/item/")]
     [InlineData("http://www.platousport.com/produkt/item/")]

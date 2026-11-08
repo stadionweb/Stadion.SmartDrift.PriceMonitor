@@ -12,10 +12,20 @@ public sealed record CrawlTarget(
 public sealed record ProductMatchCandidate(string Name, Uri SourceUrl, string? Gtin, string? ArticleNumber)
 {
     public string? MatchBasis { get; init; }
-    public Guid? VariantId { get; init; }
-    public string? Size { get; init; }
-    public string? Color { get; init; }
 }
+
+public enum VariantMatchMethod
+{
+    ExactGtin
+}
+
+public sealed record ProductVariantMatchCandidate(
+    Guid VariantId,
+    Uri ProductUrl,
+    string Gtin,
+    string? Size,
+    string? Color,
+    VariantMatchMethod MatchMethod);
 
 public sealed record PriceObservationCandidate(
     decimal? RegularPrice,
@@ -46,6 +56,7 @@ public sealed record CrawlResult(
     IReadOnlyList<PriceObservationCandidate> PriceObservations)
 {
     public string? Diagnostic { get; init; }
+    public IReadOnlyList<ProductVariantMatchCandidate> VariantMatches { get; init; } = [];
 }
 
 public interface IWebsiteCrawler

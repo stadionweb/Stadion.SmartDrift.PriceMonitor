@@ -26,8 +26,8 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
         if (settings.MaxSitemaps <= 0 || settings.MaxProductPages <= 0 || settings.MaxResponseBytes <= 0 ||
             settings.RequestInterval < TimeSpan.Zero || settings.RequestTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options));
-        if (target.Variants.Count != 1)
-            return Result(CrawlStatus.Failed, "This discovery spike requires exactly one target variant.");
+        if (!PlatouSportProductParser.ValidTarget(target))
+            return Result(CrawlStatus.Failed, "Target variants must have distinct IDs and at least one variant is required.");
 
         await gate.WaitAsync(cancellationToken);
         try
@@ -71,7 +71,9 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
             if (sitemaps.Count == 0) return Result(CrawlStatus.Failed, "No product sitemaps found.");
 
             CrawlResult? fallback = null;
-            CrawlResult? unpricedExact = null;
+            var products = new List<ProductMatchCandidate>();
+            var variants = new List<ProductVariantMatchCandidate>();
+            var observations = new List<PriceObservationCandidate>();
             var pages = new HashSet<Uri>();
             var truncated = sitemaps.Count > settings.MaxSitemaps;
             foreach (var sitemap in sitemaps.Take(settings.MaxSitemaps))
@@ -94,10 +96,13 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
             {
                 if (!robots.Allows(url)) { truncated = true; continue; }
                 var result = PlatouSportProductParser.Parse(await Fetch(url), url, target, DateTimeOffset.UtcNow);
-                if (result.ProductMatches.FirstOrDefault()?.MatchBasis == "gtin")
+                if (result.VariantMatches.Count > 0)
                 {
-                    if (result.PriceObservations.Count > 0) return result;
-                    unpricedExact ??= result;
+                    products.AddRange(result.ProductMatches);
+                    variants.AddRange(result.VariantMatches);
+                    observations.AddRange(result.PriceObservations);
+                    if (target.Variants.All(v => observations.Any(o => o.VariantId == v.Id)))
+                        return new CrawlResult(CrawlStatus.Succeeded, products, observations) { VariantMatches = variants };
                     continue;
                 }
                 if (result.Status == CrawlStatus.Incomplete) truncated = true;
@@ -105,7 +110,12 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
                     result.ProductMatches[0].MatchBasis == "article-number"))
                     fallback = result;
             }
-            if (unpricedExact is not null) return unpricedExact;
+            if (variants.Count > 0)
+                return new CrawlResult(CrawlStatus.Incomplete, products, observations)
+                {
+                    VariantMatches = variants,
+                    Diagnostic = "Some target variants are unmatched or have no unambiguous priced offer."
+                };
             if (fallback is not null)
                 return fallback with { Status = CrawlStatus.Incomplete,
                     Diagnostic = "Candidate is not an exact GTIN match." };

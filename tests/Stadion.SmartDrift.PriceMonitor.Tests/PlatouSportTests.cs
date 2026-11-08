@@ -9,6 +9,7 @@ namespace Stadion.SmartDrift.PriceMonitor.Tests;
 public class PlatouSportTests
 {
     private static readonly Guid VariantId = Guid.Parse("dfef8022-1c76-404b-919e-71a9363bb83f");
+    private static readonly Guid XlVariantId = Guid.Parse("9f1429c4-420d-4655-962c-29a15e5119ce");
     private static readonly CrawlTarget Target = new(Guid.NewGuid(), "ArcTeryx", "Beta SL Jacket M", "X000010552",
         [new CrawlVariant(VariantId, "0623555782018", null, "M", "Black")]);
     private static readonly Uri ProductUrl = new("https://www.platousport.com/produkt/item-123/");
@@ -19,9 +20,12 @@ public class PlatouSportTests
     {
         var now = DateTimeOffset.UtcNow;
         var result = PlatouSportProductParser.Parse(Fixture("beta-sl-jacket.html"), ProductUrl, Target, now);
-        var match = Assert.Single(result.ProductMatches);
+        var product = Assert.Single(result.ProductMatches);
+        var match = Assert.Single(result.VariantMatches);
         var observation = Assert.Single(result.PriceObservations);
-        Assert.Equal("gtin", match.MatchBasis);
+        Assert.Equal("gtin", product.MatchBasis);
+        Assert.Null(product.Gtin);
+        Assert.Equal(VariantMatchMethod.ExactGtin, match.MatchMethod);
         Assert.Equal("0623555782018", match.Gtin);
         Assert.Equal(VariantId, match.VariantId);
         Assert.Equal("M", match.Size);
@@ -33,6 +37,43 @@ public class PlatouSportTests
         Assert.Equal(ProductUrl, observation.SourceUrl);
         Assert.Equal(now, observation.ObservedAt);
         Assert.Equal(VariantId, observation.VariantId);
+    }
+
+    [Fact]
+    public void ParserReturnsOneProductWithSeparateMAndXlVariantMatches()
+    {
+        var url = new Uri("https://www.platousport.com/produkt/arcteryx-beta-sl-jacket-mens-black-2/");
+        var target = Target with { Variants = [Target.Variants[0], new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
+        var now = DateTimeOffset.UtcNow;
+        var result = PlatouSportProductParser.Parse(Fixture("beta-sl-jacket.html"), url, target, now);
+        Assert.Equal(CrawlStatus.Succeeded, result.Status);
+        var product = Assert.Single(result.ProductMatches);
+        Assert.Equal("Arc'teryx Beta SL Jacket Mens Black", product.Name);
+        Assert.Equal(url, product.SourceUrl);
+        Assert.Equal(2, result.VariantMatches.Count);
+        var m = Assert.Single(result.VariantMatches, v => v.VariantId == VariantId);
+        var xl = Assert.Single(result.VariantMatches, v => v.VariantId == XlVariantId);
+        Assert.Equal(("0623555782018", "M", "Black", VariantMatchMethod.ExactGtin, url),
+            (m.Gtin, m.Size, m.Color, m.MatchMethod, m.ProductUrl));
+        Assert.Equal(("0623555782032", "XL", "Black", VariantMatchMethod.ExactGtin, url),
+            (xl.Gtin, xl.Size, xl.Color, xl.MatchMethod, xl.ProductUrl));
+        var xlObservation = Assert.Single(result.PriceObservations, o => o.VariantId == XlVariantId);
+        Assert.Equal(4450.75m, xlObservation.CurrentPrice);
+        Assert.Equal("NOK", xlObservation.CurrencyCode);
+        Assert.True(xlObservation.InStock);
+        Assert.Equal(url, xlObservation.SourceUrl);
+        Assert.Equal(now, xlObservation.ObservedAt);
+    }
+
+    [Fact]
+    public void SeparateSizeSelectionsResolveToSameProduct()
+    {
+        var xlTarget = Target with { Variants = [new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
+        var m = PlatouSportProductParser.Parse(Fixture("beta-sl-jacket.html"), ProductUrl, Target, DateTimeOffset.UtcNow);
+        var xl = PlatouSportProductParser.Parse(Fixture("beta-sl-jacket.html"), ProductUrl, xlTarget, DateTimeOffset.UtcNow);
+        Assert.Equal(Assert.Single(m.ProductMatches), Assert.Single(xl.ProductMatches));
+        Assert.NotEqual(Assert.Single(m.VariantMatches).Gtin, Assert.Single(xl.VariantMatches).Gtin);
+        Assert.Equal(4450.75m, Assert.Single(xl.PriceObservations).CurrentPrice);
     }
 
     [Fact]
@@ -50,6 +91,24 @@ public class PlatouSportTests
         var html = Fixture("beta-sl-jacket.html").Replace("\"size\": \"M\"", "\"size\": \"S\"");
         var result = PlatouSportProductParser.Parse(html, ProductUrl, Target, DateTimeOffset.UtcNow);
         Assert.Equal("article-number", Assert.Single(result.ProductMatches).MatchBasis);
+        Assert.Empty(result.PriceObservations);
+    }
+
+    [Fact]
+    public void AmbiguousRepeatedGtinDoesNotProduceVariantPrice()
+    {
+        var html = Fixture("beta-sl-jacket.html").Replace("0623555782025", "0623555782018");
+        var result = PlatouSportProductParser.Parse(html, ProductUrl, Target, DateTimeOffset.UtcNow);
+        Assert.Empty(result.VariantMatches);
+        Assert.Empty(result.PriceObservations);
+    }
+
+    [Fact]
+    public void DuplicateTargetGtinCannotBeAssignedArbitrarily()
+    {
+        var target = Target with { Variants = [Target.Variants[0], new CrawlVariant(XlVariantId, "0623555782018", null, "M", "Black")] };
+        var result = PlatouSportProductParser.Parse(Fixture("beta-sl-jacket.html"), ProductUrl, target, DateTimeOffset.UtcNow);
+        Assert.Empty(result.VariantMatches);
         Assert.Empty(result.PriceObservations);
     }
 
@@ -76,12 +135,27 @@ public class PlatouSportTests
     }
 
     [Fact]
-    public async Task MultipleVariantsAreRejectedRatherThanSilentlyDropped()
+    public async Task MultipleVariantsAreDiscoveredOnOneProduct()
     {
         using var client = new HttpClient(new FixtureHandler());
-        var target = Target with { Variants = [Target.Variants[0], new CrawlVariant(Guid.NewGuid(), "123", null, null, null)] };
+        var target = Target with { Variants = [Target.Variants[0], new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
         var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero)).CrawlAsync(target, CancellationToken.None);
-        Assert.Equal(CrawlStatus.Failed, result.Status);
+        Assert.Equal(CrawlStatus.Succeeded, result.Status);
+        Assert.Single(result.ProductMatches);
+        Assert.Equal(2, result.VariantMatches.Count);
+        Assert.Equal(2, result.PriceObservations.Count);
+    }
+
+    [Fact]
+    public async Task UnmatchedVariantYieldsPartialResult()
+    {
+        using var client = new HttpClient(new FixtureHandler());
+        var target = Target with { Variants = [Target.Variants[0], new CrawlVariant(XlVariantId, "123", null, null, null)] };
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero)).CrawlAsync(target, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Incomplete, result.Status);
+        Assert.Single(result.ProductMatches);
+        Assert.Single(result.VariantMatches);
+        Assert.Single(result.PriceObservations);
     }
 
     [Fact]

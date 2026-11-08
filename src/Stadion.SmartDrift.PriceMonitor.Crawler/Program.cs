@@ -1,6 +1,7 @@
 using Stadion.SmartDrift.PriceMonitor.Crawler;
 using Stadion.SmartDrift.PriceMonitor.Core;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 var builder = Host.CreateApplicationBuilder();
 builder.Services.AddCrawlerRuntime();
@@ -35,7 +36,9 @@ try
         var target = new CrawlTarget(Guid.Empty, "ArcTeryx", "Beta SL Jacket M", "X000010552",
             [new CrawlVariant(Guid.Empty, "0623555782018", null, "M", "Black")]);
         var result = await registry.ExecuteAsync(args[1], target, CancellationToken.None);
-        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+        var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+        jsonOptions.Converters.Add(new JsonStringEnumConverter());
+        Console.WriteLine(JsonSerializer.Serialize(result, jsonOptions));
         return result.Status == CrawlStatus.Succeeded ? 0 : 1;
     }
 

@@ -14,8 +14,8 @@ public static class PlatouSportProductParser
 
     public static CrawlResult Parse(string html, Uri sourceUrl, CrawlTarget target, DateTimeOffset observedAt)
     {
-        if (target.Variants.Count != 1)
-            return new CrawlResult(CrawlStatus.Failed, [], []) { Diagnostic = "This discovery spike requires exactly one target variant." };
+        if (!ValidTarget(target))
+            return new CrawlResult(CrawlStatus.Failed, [], []) { Diagnostic = "Target variants must have distinct IDs and at least one variant is required." };
         CrawlResult? fallback = null;
         var sawProduct = false;
         var insufficientIdentity = false;
@@ -29,7 +29,7 @@ public static class PlatouSportProductParser
                     sawProduct = true;
                     insufficientIdentity |= !HasVariantGtins(product);
                     var result = MatchProduct(product, sourceUrl, target, observedAt);
-                    if (result?.ProductMatches[0].MatchBasis == "gtin")
+                    if (result?.VariantMatches.Count > 0)
                         return result;
                     if (result is not null && (fallback is null ||
                         result.ProductMatches[0].MatchBasis == "article-number"))
@@ -80,11 +80,16 @@ public static class PlatouSportProductParser
                 variants.Add(children);
         }
 
+        var variantMatches = new List<ProductVariantMatchCandidate>();
+        var observations = new List<PriceObservationCandidate>();
+        var counts = variants.Select(Gtin).Where(gtin => !string.IsNullOrWhiteSpace(gtin))
+            .GroupBy(gtin => gtin!, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
         foreach (var variant in variants)
         {
-            var gtin = Text(variant, "gtin") ?? Text(variant, "gtin13") ?? Text(variant, "gtin14") ??
-                Text(variant, "gtin12") ?? Text(variant, "gtin8");
+            var gtin = Gtin(variant);
             if (string.IsNullOrWhiteSpace(gtin))
+                continue;
+            if (counts[gtin] != 1)
                 continue;
             var matches = target.Variants.Where(v => !string.IsNullOrWhiteSpace(v.Gtin) && v.Gtin == gtin).ToArray();
             if (matches.Length != 1)
@@ -94,16 +99,21 @@ public static class PlatouSportProductParser
             if (Conflicts(size, matches[0].Size) || Conflicts(color, matches[0].Color))
                 continue;
 
-            var match = new ProductMatchCandidate(name, url, gtin, Text(variant, "mpn") ?? Text(product, "mpn"))
-            {
-                MatchBasis = "gtin", VariantId = matches[0].Id,
-                Size = size, Color = color
-            };
+            if (variantMatches.Any(v => v.VariantId == matches[0].Id))
+                continue;
+            variantMatches.Add(new ProductVariantMatchCandidate(matches[0].Id, url, gtin, size, color, VariantMatchMethod.ExactGtin));
             var observation = Offer(variant, url, observedAt, matches[0].Id);
-            return new CrawlResult(observation is null ? CrawlStatus.Incomplete : CrawlStatus.Succeeded,
-                [match], observation is null ? [] : [observation])
+            if (observation is not null) observations.Add(observation);
+        }
+
+        if (variantMatches.Count > 0)
+        {
+            var complete = observations.Count == target.Variants.Count;
+            return new CrawlResult(complete ? CrawlStatus.Succeeded : CrawlStatus.Incomplete,
+                [new ProductMatchCandidate(name, url, null, Text(product, "mpn")) { MatchBasis = "gtin" }], observations)
             {
-                Diagnostic = observation is null ? "Exact variant found, but no unambiguous priced offer was available." : null
+                VariantMatches = variantMatches,
+                Diagnostic = complete ? null : "Some target variants are unmatched or have no unambiguous priced offer."
             };
         }
 
@@ -164,8 +174,11 @@ public static class PlatouSportProductParser
     }
 
     private static bool HasGtin(JsonElement product) =>
-        !string.IsNullOrWhiteSpace(Text(product, "gtin") ?? Text(product, "gtin13") ?? Text(product, "gtin14") ??
-            Text(product, "gtin12") ?? Text(product, "gtin8"));
+        !string.IsNullOrWhiteSpace(Gtin(product));
+
+    private static string? Gtin(JsonElement product) =>
+        Text(product, "gtin") ?? Text(product, "gtin13") ?? Text(product, "gtin14") ??
+        Text(product, "gtin12") ?? Text(product, "gtin8");
 
     private static string? Text(JsonElement element, string property)
     {
@@ -185,4 +198,7 @@ public static class PlatouSportProductParser
 
     private static bool Conflicts(string? left, string? right) =>
         !string.IsNullOrWhiteSpace(left) && !string.IsNullOrWhiteSpace(right) && !EqualIdentity(left, right);
+
+    internal static bool ValidTarget(CrawlTarget target) => target.Variants.Count > 0 &&
+        target.Variants.Select(v => v.Id).Distinct().Count() == target.Variants.Count;
 }

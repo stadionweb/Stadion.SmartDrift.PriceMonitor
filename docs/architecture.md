@@ -9,17 +9,17 @@ SmartDrift_PriceMonitor
   v
 Price Monitor Crawler
   +--> website adapter --> external website
-  +--> future ProductMatches
-  +--> future ProductVariantMatches
-  +--> future PriceObservations
-  +--> future SmartDrift_Integration reporting
+  +--> ProductMatches
+  +--> ProductVariantMatches
+  +--> append-only PriceObservations
+  +--> SmartDrift_Integration reporting
 ```
 
 The crawler is a separate executable service. Core owns small observation and crawler contracts and has no SQL, HTTP implementation, browser, website adapter or SmartDrift runtime dependency. Infrastructure is the future home for external-system concerns. The Worker uses the Generic Host, configuration, dependency injection and logging. Website adapters will implement `IWebsiteCrawler` with a stable unique key and accept a target and cancellation token. Different sites may need HTTP, search endpoints, structured product data, sitemaps, HTML parsing or, only if justified, browser automation. Concrete integrations should drive shared abstractions.
 
-The host starts and stops once. The `platou-sport` adapter is registered; selection alone does not run it without monitoring work. An explicit control-target option runs the fixture target against the live website. Keys are unique case-insensitively. Unknown keys and malformed selection return exit code 2. The registry forwards targets and cancellation to adapters.
+The host starts and stops once. The `platou-sport` adapter is registered; selection alone does not run it without monitoring work. An explicit control-target option runs the fixture target against the live website without persistence. The persisted command requires one positive MonitoringTarget ID and optionally filters its active variants by GTIN. Keys are unique case-insensitively. The registry forwards real bigint product/variant identities and cancellation to adapters. Unknown Website keys in persisted work produce a target-level `UnknownWebsiteAdapter` failure, not a guessed adapter.
 
-Platou Sport discovery is bounded and sequential: robots.txt, product sitemap index entries, then product-page inspection. Product candidates are distinct from `ExactGtin` variant candidates, which carry the input variant ID and product URL; multiple sizes on one page do not create multiple product candidates. Weaker matches are labeled as candidates and do not produce variant prices. A partial set of matches or prices is incomplete. The parser supports JSON-LD and WooCommerce variation data, tested against a minimized reconstruction of locally supplied captured fields. Live validation is separate. Future polling must use a previously verified persisted match URL rather than rerun discovery; neither persistence nor polling is implemented.
+Platou Sport discovery is bounded and sequential: robots.txt, product sitemap index entries, then product-page inspection. Product candidates are distinct from `ExactGtin` variant candidates, which carry the input variant ID and product URL; multiple sizes on one page do not create multiple product candidates. Weaker matches are labeled as candidates and do not produce variant prices. A partial set of matches or prices is incomplete. The parser supports JSON-LD and WooCommerce variation data, tested against a minimized reconstruction of locally supplied captured fields. Live validation is separate. Polling reads robots.txt and the verified persisted product URL directly; it verifies the external product and selected variant identities and retains discovery's origin, redirect, timeout, size and robots protections. A broken match produces `RequiresRequalification` rather than automatic discovery/reassignment.
 
 ## Matching and observations
 
@@ -35,6 +35,12 @@ Uncertain matches should be returned as candidates, not silently decided. Observ
 
 Crawler = observation. It does not make or execute pricing decisions. Future Price Intelligence may interpret observations; a future store-level Pricing Engine may consume observations or recommendations as a separate capability with explicit business rules and guardrails.
 
-## Future integration
+## Persistence and operational reporting
 
-Active `MonitoringTargets` in SmartDrift_PriceMonitor will be the work queue. The service will later read related products, variants, websites and monitoring subscriptions and store results there. Crawler executions will later report operational status through SmartDrift_Integration's `Integrations`, `IntegrationRuns` and `IntegrationRunMessages`. This foundation implements neither SQL persistence nor operational reporting and does not duplicate the Integration Runtime from Stadion.SmartDrift.Integrations. Prefer loose conceptual compatibility until a concrete need for shared code exists.
+SmartDrift owns monitoring configuration; the Worker reads only explicit active MonitoringTargets with active subscriptions/websites and eligible source variants. IsDefaultForMonitoring is never a queue signal. Core defines the monitoring/persistence boundaries without SQL dependencies. Infrastructure implements the authoritative SQL contract using typed parameters; the Worker coordinates adapter selection and target-level outcomes.
+
+External HTTP runs outside any SQL transaction. Only a complete, unambiguous ExactGtin result enters a short target transaction: recheck eligibility, lock/upsert the unique product/website identity, lock/upsert variant identities, append observations, commit. Conflicting identities fail rather than reassign. Failed or cancelled transactions roll back, preserving earlier records. Matches are idempotent; observations are append-only per explicit invocation without content/time deduplication.
+
+SmartDrift_Integration's existing Integrations, IntegrationRuns and IntegrationRunMessages represent execution history. An active manually registered `price-monitor-observation` Integration is required. The run starts before work is read and completes after target persistence, with canonical statuses and counts. Target warnings/errors carry MonitoringTarget entity IDs; one RunSummary message carries additional match/observation counts. These databases are not enlisted in a distributed transaction: reporting failure cannot undo an already committed target fact. Cancellation stops future work and uses bounded cleanup for terminal operational reporting.
+
+Schema is manually owned; there are no automatic migrations, recurring schedules, frontend changes or bulk crawls. See README for the first target-2/M-GTIN command and database-contract.md for schemas and local acceptance queries.

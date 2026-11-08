@@ -8,9 +8,9 @@ namespace Stadion.SmartDrift.PriceMonitor.Tests;
 
 public class PlatouSportTests
 {
-    private static readonly Guid VariantId = Guid.Parse("dfef8022-1c76-404b-919e-71a9363bb83f");
-    private static readonly Guid XlVariantId = Guid.Parse("9f1429c4-420d-4655-962c-29a15e5119ce");
-    private static readonly CrawlTarget Target = new(Guid.NewGuid(), "ArcTeryx", "Beta SL Jacket M", "X000010552",
+    private const long VariantId = 54618;
+    private const long XlVariantId = 54620;
+    private static readonly CrawlTarget Target = new(35148, "ArcTeryx", "Beta SL Jacket M", "X000010552",
         [new CrawlVariant(VariantId, "0623555782018", null, "M", "Black")]);
     private static readonly Uri ProductUrl = new("https://www.platousport.com/produkt/item-123/");
     private static readonly Uri CapturedUrl = new("https://www.platousport.com/produkt/arcteryx-beta-sl-jacket-mens-black-2/");
@@ -397,6 +397,81 @@ public class PlatouSportTests
             provider.GetRequiredService<CrawlerRegistry>().ExecuteAsync("platou-sport", Target, cancellation.Token));
     }
 
+    [Fact]
+    public async Task PollingFetchesKnownProductWithoutSitemapsAndPreservesRuntimePrice()
+    {
+        var handler = new FixtureHandler { Product = Fixture("captured-product-excerpt.html").Replace("5999", "6123") };
+        using var client = new HttpClient(handler);
+        var match = new VerifiedProductMatch(7, "392833", CapturedUrl, [new(VariantId, "392835", "0623555782018")]);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(Target, match, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Succeeded, result.Status);
+        Assert.Equal(6123m, Assert.Single(result.PriceObservations).CurrentPrice);
+        Assert.Equal(new[] { "/robots.txt", CapturedUrl.AbsolutePath }, handler.Paths);
+    }
+
+    [Theory]
+    [InlineData("other-product", "392835", "0623555782018")]
+    [InlineData("392833", "other-variant", "0623555782018")]
+    [InlineData("392833", "392835", "0000000000000")]
+    public async Task PollingRejectsChangedPersistedIdentity(string productId, string variantId, string gtin)
+    {
+        var handler = new FixtureHandler { Product = Fixture("captured-product-excerpt.html") };
+        using var client = new HttpClient(handler);
+        var match = new VerifiedProductMatch(7, productId, CapturedUrl, [new(VariantId, variantId, gtin)]);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(Target, match, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Failed, result.Status);
+        Assert.Contains("RequiresRequalification", result.Diagnostic);
+        Assert.Empty(result.PriceObservations);
+        Assert.DoesNotContain(handler.Paths, p => p.Contains("sitemap"));
+    }
+
+    [Theory]
+    [InlineData("https://example.org/produkt/item/")]
+    [InlineData("http://www.platousport.com/produkt/item/")]
+    [InlineData("https://www.platousport.com/produkt/item/?redirect=example")]
+    public async Task PollingRejectsUnsafePersistedUrlsBeforeHttp(string url)
+    {
+        var handler = new FixtureHandler();
+        using var client = new HttpClient(handler);
+        var match = new VerifiedProductMatch(7, "392833", new Uri(url), [new(VariantId, "392835", "0623555782018")]);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(Target, match, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Failed, result.Status);
+        Assert.Empty(handler.Paths);
+    }
+
+    [Fact]
+    public async Task MissingPersistedUrlRequiresRequalificationWithoutDiscovery()
+    {
+        var handler = new FixtureHandler();
+        using var client = new HttpClient(handler);
+        var match = new VerifiedProductMatch(7, "392833", new("https://www.platousport.com/produkt/missing/"),
+            [new(VariantId, "392835", "0623555782018")]);
+        var result = await new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero))
+            .PollAsync(Target, match, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Failed, result.Status);
+        Assert.Empty(result.PriceObservations);
+        Assert.Contains("RequiresRequalification", result.Diagnostic);
+        Assert.Equal(new[] { "/robots.txt", "/produkt/missing/" }, handler.Paths);
+    }
+
+    [Fact]
+    public async Task PollingStillHonorsRobotsAndCancellation()
+    {
+        var handler = new FixtureHandler { Robots = "User-agent: *\nDisallow: /produkt/" };
+        using var client = new HttpClient(handler);
+        var crawler = new PlatouSportCrawler(client, new(RequestInterval: TimeSpan.Zero));
+        var match = new VerifiedProductMatch(7, "392833", CapturedUrl, [new(VariantId, "392835", "0623555782018")]);
+        var result = await crawler.PollAsync(Target, match, CancellationToken.None);
+        Assert.Equal(CrawlStatus.Failed, result.Status);
+        Assert.Equal(new[] { "/robots.txt" }, handler.Paths);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => crawler.PollAsync(Target, match, cancellation.Token));
+    }
+
     private sealed class FixtureHandler : HttpMessageHandler
     {
         public string? Robots { get; init; } = Fixture("robots.txt");
@@ -422,6 +497,7 @@ public class PlatouSportTests
                 "/product-sitemap26.xml" => Sitemap,
                 "/produkt/unrelated/" => Unrelated,
                 "/produkt/item-123/" => Product,
+                "/produkt/arcteryx-beta-sl-jacket-mens-black-2/" => Product,
                 _ => null
             };
             return Task.FromResult(body is null

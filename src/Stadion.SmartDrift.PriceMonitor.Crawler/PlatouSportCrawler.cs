@@ -11,7 +11,7 @@ namespace Stadion.SmartDrift.PriceMonitor.Crawler;
 public sealed record PlatouSportOptions(int MaxSitemaps = 30, int MaxProductPages = 500, int MaxResponseBytes = 2_000_000,
     TimeSpan? RequestInterval = null, TimeSpan? RequestTimeout = null);
 
-public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? options = null) : IWebsiteCrawler
+public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? options = null) : IPollingWebsiteCrawler
 {
     private const string Agent = "StadionSmartDriftPriceMonitor";
     private static readonly Uri Origin = new("https://www.platousport.com/");
@@ -21,13 +21,22 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
     private DateTimeOffset? lastRequest;
     public string Key => "platou-sport";
 
-    public async Task<CrawlResult> CrawlAsync(CrawlTarget target, CancellationToken cancellationToken)
+    public Task<CrawlResult> CrawlAsync(CrawlTarget target, CancellationToken cancellationToken) =>
+        ExecuteAsync(target, null, cancellationToken);
+
+    public Task<CrawlResult> PollAsync(CrawlTarget target, VerifiedProductMatch match, CancellationToken cancellationToken) =>
+        ExecuteAsync(target, match, cancellationToken);
+
+    private async Task<CrawlResult> ExecuteAsync(CrawlTarget target, VerifiedProductMatch? match, CancellationToken cancellationToken)
     {
         if (settings.MaxSitemaps <= 0 || settings.MaxProductPages <= 0 || settings.MaxResponseBytes <= 0 ||
             settings.RequestInterval < TimeSpan.Zero || settings.RequestTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options));
         if (!PlatouSportProductParser.ValidTarget(target))
             return Result(CrawlStatus.Failed, "Target variants must have distinct IDs and at least one variant is required.");
+        if (match is not null && (!match.ProductUrl.IsAbsoluteUri || !SameOrigin(match.ProductUrl) ||
+            !IsProductPage(match.ProductUrl) || string.IsNullOrWhiteSpace(match.ExternalProductId)))
+            return Result(CrawlStatus.Failed, "RequiresRequalification: persisted product URL or identity is not usable.");
 
         await gate.WaitAsync(cancellationToken);
         try
@@ -64,6 +73,24 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
 
             var robots = RobotsRules.Parse(await Fetch(new Uri(Origin, "robots.txt")));
             if (robots.Delay > interval) interval = robots.Delay;
+            if (match is not null)
+            {
+                if (!robots.Allows(match.ProductUrl))
+                    return Result(CrawlStatus.Failed, "RequiresRequalification: persisted product URL is disallowed by robots.txt.");
+                var polled = PlatouSportProductParser.Parse(await Fetch(match.ProductUrl), match.ProductUrl, target, DateTimeOffset.UtcNow);
+                if (polled.Status != CrawlStatus.Succeeded || polled.ProductMatches.Count != 1 ||
+                    polled.ProductMatches[0].ExternalProductId != match.ExternalProductId ||
+                    polled.ProductMatches[0].SourceUrl != match.ProductUrl ||
+                    target.Variants.Any(input =>
+                    {
+                        var expected = match.Variants.Where(v => v.VariantId == input.Id).ToArray();
+                        var actual = polled.VariantMatches.Where(v => v.VariantId == input.Id).ToArray();
+                        return expected.Length != 1 || actual.Length != 1 || expected[0].Gtin != actual[0].Gtin ||
+                            expected[0].Gtin != input.Gtin?.Trim() || expected[0].ExternalVariantId != actual[0].ExternalVariationId;
+                    }))
+                    return Result(CrawlStatus.Failed, "RequiresRequalification: persisted product/variant identity is no longer present or priced unambiguously.");
+                return polled;
+            }
             var index = new Uri(Origin, "sitemap_index.xml");
             if (!robots.Allows(index)) return Result(CrawlStatus.Failed, "Sitemap index disallowed by robots.txt.");
             var sitemaps = ParseSitemap(await Fetch(index), "sitemapindex", "sitemap")
@@ -127,7 +154,7 @@ public sealed class PlatouSportCrawler(HttpClient client, PlatouSportOptions? op
         catch (Exception ex) when (ex is HttpRequestException or IOException or XmlException or InvalidDataException or
             OperationCanceledException or RegexMatchTimeoutException)
         {
-            return Result(CrawlStatus.Failed, $"Platou Sport discovery failed: {ex.Message}");
+            return Result(CrawlStatus.Failed, $"Platou Sport {(match is null ? "discovery" : "polling (RequiresRequalification)")} failed: {ex.Message}");
         }
         finally { gate.Release(); }
     }

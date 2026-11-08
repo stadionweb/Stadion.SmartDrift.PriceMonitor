@@ -51,6 +51,29 @@ public class PlatouSportTests
     }
 
     [Fact]
+    public void WooCommerceSeparateTargetsReturnSameProduct()
+    {
+        var html = Fixture("captured-product-excerpt.html");
+        var xlTarget = Target with { Variants = [new CrawlVariant(XlVariantId, "0623555782032", null, "XL", "Black")] };
+        var m = PlatouSportProductParser.Parse(html, CapturedUrl, Target, DateTimeOffset.UtcNow);
+        var xl = PlatouSportProductParser.Parse(html, CapturedUrl, xlTarget, DateTimeOffset.UtcNow);
+        Assert.Equal(Assert.Single(m.ProductMatches), Assert.Single(xl.ProductMatches));
+        Assert.Equal("392837", Assert.Single(xl.VariantMatches).ExternalVariationId);
+        Assert.Equal(5999m, Assert.Single(xl.PriceObservations).CurrentPrice);
+    }
+
+    [Fact]
+    public void WooCommerceNoMatchAndOutOfStockAreReported()
+    {
+        var html = Fixture("captured-product-excerpt.html");
+        var other = Target with { Variants = [new CrawlVariant(VariantId, "0000000000000", null, null, null)] };
+        Assert.Equal(CrawlStatus.NotFound, PlatouSportProductParser.Parse(html, CapturedUrl, other, DateTimeOffset.UtcNow).Status);
+        var outOfStock = PlatouSportProductParser.Parse(html.Replace("&quot;is_in_stock&quot;:true", "&quot;is_in_stock&quot;:false"),
+            CapturedUrl, Target, DateTimeOffset.UtcNow);
+        Assert.False(Assert.Single(outOfStock.PriceObservations).InStock);
+    }
+
+    [Fact]
     public void WooCommerceMissingCurrencyOrInvalidPayloadNeverInventsObservation()
     {
         var html = Fixture("captured-product-excerpt.html");

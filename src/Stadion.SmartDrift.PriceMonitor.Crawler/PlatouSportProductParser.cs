@@ -146,8 +146,9 @@ public static class PlatouSportProductParser
         {
             if (!product.TryGetProperty("offers", out var offers)) return null;
             var items = offers.ValueKind == JsonValueKind.Array ? offers.EnumerateArray().ToArray() : [offers];
-            var currencies = items.Where(o => o.ValueKind == JsonValueKind.Object && IsType(o, "Offer"))
-                .Select(o => Text(o, "priceCurrency")).Where(c => !string.IsNullOrWhiteSpace(c)).Distinct(StringComparer.Ordinal).ToArray();
+            if (items.Length == 0 || items.Any(o => o.ValueKind != JsonValueKind.Object || !IsType(o, "Offer") ||
+                string.IsNullOrWhiteSpace(Text(o, "priceCurrency")))) return null;
+            var currencies = items.Select(o => Text(o, "priceCurrency")).Distinct(StringComparer.Ordinal).ToArray();
             return currencies.Length == 1 ? currencies[0] : null;
         }
 

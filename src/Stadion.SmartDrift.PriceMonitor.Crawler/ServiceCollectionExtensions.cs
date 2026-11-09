@@ -17,6 +17,17 @@ public static class ServiceCollectionExtensions
                 new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) },
                 new PlatouSportOptions(MaxSitemaps: maxSitemaps, MaxProductPages: maxPages));
         });
+        services.AddSingleton<IWebsiteCrawler>(provider =>
+        {
+            var configuration = provider.GetService<IConfiguration>();
+            var maxPages = configuration?.GetValue<int?>("BrekkeSport:MaxProductPages") ?? 500;
+            var maxSitemaps = configuration?.GetValue<int?>("BrekkeSport:MaxSitemaps") ?? 30;
+            if (maxPages is < 1 or > 100_000 || maxSitemaps is < 1 or > 100)
+                throw new InvalidOperationException("Brekke Sport discovery limits are out of range.");
+            return new BrekkeSportCrawler(new HttpClient(
+                new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) },
+                new BrekkeSportOptions(MaxSitemaps: maxSitemaps, MaxProductPages: maxPages));
+        });
         services.AddSingleton<CrawlerRegistry>();
         return services;
     }

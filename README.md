@@ -38,6 +38,10 @@ The parser understands JSON-LD `Product`/`ProductGroup` and WooCommerce `data-pr
 
 The control-target command remains a nonpersisting discovery spike. Persisted monitoring uses discovery for the first match and verified direct-URL polling for subsequent runs.
 
+## Brekke Sport nopCommerce adapter
+
+The registered `brekke-sport` adapter targets `https://www.brekkesport.no`. It performs bounded, sequential discovery through same-origin sitemap URLs listed in `robots.txt` (falling back to `/sitemap.xml`), and polls a previously verified product URL directly. It respects robots allow/disallow and crawl-delay rules, rejects redirects and foreign URLs, and limits response size, request time, sitemap count, and product pages. Discovery and polling currently accept exact GTIN evidence and a variant-specific schema.org JSON-LD `Offer`; unsupported or incomplete product markup never creates an observation. Configure optional bounds with `BrekkeSport__MaxSitemaps` (1–100) and `BrekkeSport__MaxProductPages` (1–100000). Automated fixtures cover the supported JSON-LD contract; live site/database qualification requires environment access and must confirm the storefront actually exposes these fields.
+
 The smoke tests start the Worker via `dotnet run --no-build`, using project path and configuration embedded by MSBuild, not a path guessed from the test runner. They capture stdout, stderr and exit code on failure. They are intended to run with both `dotnet test` and Visual Studio Test Explorer after building the projects.
 
 ## First persisted monitoring observation

@@ -53,14 +53,16 @@ public class RuntimeSmokeTests
         Assert.True(output.Contains(expectedMessage, StringComparison.Ordinal) || error.Contains(expectedMessage, StringComparison.Ordinal), diagnostic);
     }
 
-    [Fact]
-    public async Task RegisteredCrawlerSelectionDoesNotContactWebsiteWithoutControlTarget()
+    [Theory]
+    [InlineData("platou-sport")]
+    [InlineData("brekke-sport")]
+    public async Task RegisteredCrawlerSelectionDoesNotContactWebsiteWithoutControlTarget(string crawlerKey)
     {
         var metadata = typeof(RuntimeSmokeTests).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
             .ToDictionary(attribute => attribute.Key, attribute => attribute.Value);
         var startInfo = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in new[] { "run", "--no-build", "--no-restore", "--project", metadata["CrawlerProjectPath"]!,
-            "--configuration", metadata["BuildConfiguration"]!, "--", "--run", "platou-sport" })
+            "--configuration", metadata["BuildConfiguration"]!, "--", "--run", crawlerKey })
             startInfo.ArgumentList.Add(argument);
         using var process = Process.Start(startInfo)!;
         var stdout = process.StandardOutput.ReadToEndAsync();
@@ -71,6 +73,6 @@ public class RuntimeSmokeTests
         var output = await stdout;
         var error = await stderr;
         Assert.True(process.ExitCode == 0, $"stdout:\n{output}\nstderr:\n{error}");
-        Assert.Contains("no monitoring targets are configured", output);
+        Assert.Contains("selected, but no monitoring targets are configured", output);
     }
 }

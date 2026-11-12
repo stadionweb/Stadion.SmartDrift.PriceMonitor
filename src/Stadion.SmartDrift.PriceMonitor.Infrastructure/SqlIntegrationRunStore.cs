@@ -38,10 +38,18 @@ public sealed class SqlIntegrationRunStore : IIntegrationRunStore
         if (outcome.Code == "Found") return;
         await using var connection = connectionFactory();
         await connection.OpenAsync(cancellationToken);
+        var details = JsonSerializer.Serialize(new
+        {
+            outcome.WebsiteKey,
+            outcome.ProductId,
+            outcome.ProductVariantId,
+            outcome.Gtin,
+            ResultCode = outcome.Code
+        });
         await using var command = MessageCommand(connection, runId,
             outcome.Code is "NoMatch" or "Ambiguous" or "Incomplete" ? "Warning" : "Error",
             outcome.Code, outcome.Diagnostic ?? outcome.Code, "MonitoringTarget",
-            outcome.TargetId.ToString(System.Globalization.CultureInfo.InvariantCulture), null);
+            outcome.TargetId.ToString(System.Globalization.CultureInfo.InvariantCulture), details);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -70,16 +78,32 @@ public sealed class SqlIntegrationRunStore : IIntegrationRunStore
             SqlStore.Add(command, "@Failed", DbType.Int32, summary.Failed);
             SqlStore.Add(command, "@Warnings", DbType.Int32, summary.Warnings);
             var failure = summary.Outcomes.FirstOrDefault(o => o.Code is not ("Found" or "NoMatch" or "Ambiguous" or "Incomplete"));
-            SqlStore.Add(command, "@ErrorCode", DbType.String, SqlStore.Bound(failure?.Code, 100), 100);
-            SqlStore.Add(command, "@ErrorSummary", DbType.String, SqlStore.Bound(failure?.Diagnostic ?? failure?.Code, 2000), 2000);
+            var errorCode = failure?.Code ?? (summary.WasCancelled ? "Cancelled" :
+                summary.FatalFailure ? "BatchSelectionFailed" : null);
+            var errorSummary = failure?.Diagnostic ?? (summary.WasCancelled ? "Batch execution was cancelled." :
+                summary.FatalFailure ? "Batch work selection or orchestration failed." : null);
+            SqlStore.Add(command, "@ErrorCode", DbType.String, SqlStore.Bound(errorCode, 100), 100);
+            SqlStore.Add(command, "@ErrorSummary", DbType.String, SqlStore.Bound(errorSummary, 2000), 2000);
             await command.ExecuteNonQueryAsync(cancellationToken);
             var details = JsonSerializer.Serialize(new
             {
+                summary.IsBatch,
+                summary.WebsiteKey,
+                summary.MaxTargets,
+                summary.EligibleTargets,
+                summary.Processed,
+                summary.Found,
+                summary.NoMatch,
+                summary.Incomplete,
+                summary.Ambiguous,
+                summary.RequiresRequalification,
+                summary.WasCancelled,
+                summary.FatalFailure,
                 summary.ProductMatchesCreated, summary.ProductMatchesReused,
                 summary.VariantMatchesCreated, summary.VariantMatchesReused, summary.ObservationsWritten
             });
             await using var message = MessageCommand(connection, summary.RunId, "Information", "RunSummary",
-                "Bounded monitoring run completed.", null, null, details, transaction);
+                "Monitoring run completed.", null, null, details, transaction);
             await message.ExecuteNonQueryAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
         }

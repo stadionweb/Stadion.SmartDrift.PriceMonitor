@@ -5,7 +5,7 @@ using Stadion.SmartDrift.PriceMonitor.Core;
 
 namespace Stadion.SmartDrift.PriceMonitor.Infrastructure;
 
-public sealed class SqlMonitoringStore : IMonitoringStore
+public sealed class SqlMonitoringStore : IMonitoringStore, IBatchedMonitoringStore
 {
     private readonly Func<DbConnection> connectionFactory;
 
@@ -58,6 +58,68 @@ public sealed class SqlMonitoringStore : IMonitoringStore
                 SqlStore.Text(reader, 10), SqlStore.Text(reader, 11)));
         }
         return work is null ? [] : [work];
+    }
+
+    public async Task<IReadOnlyList<MonitoringWorkItem>> ReadBatchTargetsAsync(
+        MonitoringBatchSelection selection, CancellationToken cancellationToken)
+    {
+        if (selection.WebsiteKey is { Length: > 100 } ||
+            selection.MaxTargets is < 1 or > MonitoringBatchSelection.HardMaxTargets)
+            throw new ArgumentException("Batch selection is outside the supported bound.", nameof(selection));
+
+        await using var connection = connectionFactory();
+        await connection.OpenAsync(cancellationToken);
+        await using var command = SqlStore.Command(connection, """
+            WITH SelectedTargets AS
+            (
+                SELECT TOP (@MaxTargets) t.Id AS TargetId, s.Id AS SubscriptionId, w.Id AS WebsiteId,
+                       w.[Key] AS WebsiteKey, p.Id AS ProductId, p.Brand, p.Name, p.ProducerArticleNumber
+                FROM dbo.MonitoringTargets t
+                JOIN dbo.MonitoringSubscriptions s ON s.Id = t.MonitoringSubscriptionId
+                JOIN dbo.Websites w ON w.Id = t.WebsiteId
+                JOIN dbo.Products p ON p.Id = s.ProductId
+                WHERE t.Status = N'Active' AND s.Status = N'Active'
+                  AND w.IsActive = 1 AND p.SourceActive = 1
+                  AND s.ValidFrom <= SYSUTCDATETIME()
+                  AND (s.ValidTo IS NULL OR s.ValidTo > SYSUTCDATETIME())
+                  AND (@WebsiteKey IS NULL OR
+                       (w.[Key] COLLATE Latin1_General_100_BIN2 = @WebsiteKey COLLATE Latin1_General_100_BIN2
+                        AND DATALENGTH(w.[Key]) = DATALENGTH(@WebsiteKey)))
+                ORDER BY t.Id
+            )
+            SELECT s.TargetId, s.SubscriptionId, s.WebsiteId, s.WebsiteKey, s.ProductId,
+                   s.Brand, s.Name, s.ProducerArticleNumber, v.Id, v.Gtin,
+                   COALESCE(NULLIF(v.SizeInfo, N''), v.SizeName), v.ColorName
+            FROM SelectedTargets s
+            LEFT JOIN dbo.ProductVariants v ON v.ProductId = s.ProductId AND v.SourceActive = 1
+            ORDER BY s.TargetId, v.Id;
+            """);
+        SqlStore.Add(command, "@MaxTargets", DbType.Int32, selection.MaxTargets ?? MonitoringBatchSelection.HardMaxTargets);
+        SqlStore.Add(command, "@WebsiteKey", DbType.String, selection.WebsiteKey, 100);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        var result = new List<MonitoringWorkItem>();
+        MonitoringWorkItem? current = null;
+        var variants = new List<CrawlVariant>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var targetId = reader.GetInt64(0);
+            if (current?.TargetId != targetId)
+            {
+                if (current is not null)
+                    result.Add(current with { Target = current.Target with { Variants = variants.ToArray() } });
+                variants = [];
+                current = new MonitoringWorkItem(targetId, reader.GetInt64(1), reader.GetInt32(2),
+                    reader.GetString(3), new CrawlTarget(reader.GetInt64(4), SqlStore.Text(reader, 5),
+                        SqlStore.Text(reader, 6), SqlStore.Text(reader, 7), variants));
+            }
+            if (!reader.IsDBNull(8))
+                variants.Add(new CrawlVariant(reader.GetInt64(8), SqlStore.Text(reader, 9), null,
+                    SqlStore.Text(reader, 10), SqlStore.Text(reader, 11)));
+        }
+        if (current is not null)
+            result.Add(current with { Target = current.Target with { Variants = variants.ToArray() } });
+        return result;
     }
 
     public async Task<VerifiedProductMatch?> ReadVerifiedMatchAsync(

@@ -63,6 +63,66 @@ public class PersistedMonitoringSmokeTests
         Assert.Contains(message, output + error);
     }
 
+    [Fact]
+    public async Task BatchContinuesAcrossFoundNoMatchIncompleteRequalificationAndUnknownAdapter()
+    {
+        var url = new Uri("https://www.platousport.com/produkt/arcteryx-beta-sl-jacket-mens-black-2/");
+        var directory = Path.Combine(Path.GetTempPath(), "price-monitor-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            MonitoringWorkItem Item(long id, string key, long productId, params CrawlVariant[] variants) =>
+                new(id, id, 1, key, new(productId, "ArcTeryx", "Beta SL Jacket M", "X000010552", variants));
+            var work = Item(1, "platou-sport", 35148, new CrawlVariant(54618, "0623555782018", null, "M", null));
+            var fixture = new OfflineMonitoringFixture(work, new()
+            {
+                ["https://www.platousport.com/robots.txt"] = "User-agent: *\nDisallow:",
+                ["https://www.platousport.com/sitemap_index.xml"] =
+                    """<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>https://www.platousport.com/product-sitemap.xml</loc></sitemap></sitemapindex>""",
+                ["https://www.platousport.com/product-sitemap.xml"] =
+                    $"""<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>{url}</loc></url></urlset>""",
+                [url.AbsoluteUri] = File.ReadAllText(Path.Combine(AppContext.BaseDirectory,
+                    "Fixtures", "PlatouSport", "captured-product-excerpt.html")).Replace("5999", "6123")
+            })
+            {
+                BatchWorkItems =
+                [
+                    work,
+                    Item(2, "platou-sport", 35149, new CrawlVariant(54619, "0999999999999", null, "L", null)),
+                    Item(3, "platou-sport", 35150),
+                    Item(4, "unknown", 35151, new CrawlVariant(54620, "0623555782018", null, "M", null)),
+                    Item(5, "platou-sport", 35152, new CrawlVariant(54621, "0623555782018", null, "M", null)),
+                    Item(6, "platou-sport", 35153, new CrawlVariant(54622, "0623555782018", null, "M", null))
+                ],
+                MatchesByTargetId = new()
+                {
+                    ["5"] = new(7, "stale-product", url, [new(54621, "stale-variant", "0623555782018")])
+                }
+            };
+            var path = Path.Combine(directory, "fixture.json");
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(fixture));
+            var (actualExit, output, error) = await ExecuteAsync(
+                ["--run", "persisted-monitoring-batch", "--max-targets", "5", "--offline-fixture", path]);
+
+            Assert.True(actualExit == 1, $"exit: {actualExit}\nstdout:\n{output}\nstderr:\n{error}");
+            var json = output.Split('\n').Single(line => line.StartsWith("{\"RunId\"", StringComparison.Ordinal));
+            using var summary = JsonDocument.Parse(json);
+            var root = summary.RootElement;
+            Assert.Equal(5, root.GetProperty("EligibleTargets").GetInt32());
+            Assert.Equal(5, root.GetProperty("Processed").GetInt32());
+            Assert.Equal(5, root.GetProperty("MaxTargets").GetInt32());
+            Assert.Equal(1, root.GetProperty("Found").GetInt32());
+            Assert.Equal(1, root.GetProperty("NoMatch").GetInt32());
+            Assert.Equal(1, root.GetProperty("Incomplete").GetInt32());
+            Assert.Equal(1, root.GetProperty("RequiresRequalification").GetInt32());
+            Assert.Equal(2, root.GetProperty("Failed").GetInt32());
+            Assert.Equal(1, root.GetProperty("ObservationsWritten").GetInt32());
+            Assert.Equal(new[] { "Found", "NoMatch", "Incomplete", "UnknownWebsiteAdapter", "RequiresRequalification" },
+                root.GetProperty("Outcomes").EnumerateArray().Select(o => o.GetProperty("Code").GetString()).ToArray());
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     private static async Task<(int ExitCode, string Output, string Error)> ExecuteAsync(string[] args)
     {
         var metadata = typeof(PersistedMonitoringSmokeTests).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()

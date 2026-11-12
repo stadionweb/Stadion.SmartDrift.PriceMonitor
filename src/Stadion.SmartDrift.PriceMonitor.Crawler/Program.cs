@@ -21,6 +21,48 @@ try
         return 0;
     }
 
+    if (args.Length >= 2 && args[0] == "--run" && args[1] == "persisted-monitoring-batch")
+    {
+        if (!PersistedMonitoringBatchCommand.TryParse(args, out var selection, out var fixture))
+        {
+            logger.LogError("Usage: --run persisted-monitoring-batch [--website-key <key>] [--max-targets <1-100000>] [--offline-fixture <absolute-json-path>]");
+            return 2;
+        }
+        try
+        {
+            PersistedMonitoringRunner runner;
+            if (fixture is not null)
+            {
+                runner = await OfflineMonitoringFixture.CreateRunnerAsync(fixture, stopping);
+                logger.LogWarning("OFFLINE FIXTURE: no SQL or live HTTP; this is not persisted acceptance.");
+            }
+            else
+            {
+                var priceMonitor = builder.Configuration.GetConnectionString("PriceMonitor");
+                var integration = builder.Configuration.GetConnectionString("Integration");
+                if (string.IsNullOrWhiteSpace(priceMonitor) || string.IsNullOrWhiteSpace(integration))
+                {
+                    logger.LogError("Persisted monitoring batch requires ConnectionStrings:PriceMonitor and ConnectionStrings:Integration.");
+                    return 2;
+                }
+                runner = new(new SqlMonitoringStore(priceMonitor), new SqlIntegrationRunStore(integration), registry);
+            }
+            var summary = await runner.RunBatchAsync(selection!, stopping);
+            Console.WriteLine(JsonSerializer.Serialize(summary));
+            return summary.ExitCode;
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+        {
+            logger.LogWarning("Persisted monitoring batch cancelled.");
+            return 1;
+        }
+        catch (Exception)
+        {
+            logger.LogError("Persisted monitoring batch failed. Check configuration, schema, and the IntegrationRun operational result.");
+            return 1;
+        }
+    }
+
     if (args.Length >= 2 && args[0] == "--run" && args[1] == "persisted-monitoring")
     {
         if (!PersistedMonitoringCommand.TryParse(args, out var selection, out var fixture))

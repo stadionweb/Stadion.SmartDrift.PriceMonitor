@@ -32,13 +32,14 @@ Relationships/uniqueness:
   `MonitoringTargets.WebsiteId` → `Websites.Id`; `UNIQUE(MonitoringSubscriptionId, WebsiteId)`.
 - `Websites`: `UNIQUE([Key])`. The key selects the crawler adapter; an unknown key is an explicit failure.
 
-Selection **requires a positive explicit target ID**. Only the matching target is read, with
+Single-target selection **requires a positive explicit target ID**. Only the matching target is read, with
 target/subscription status `Active`, active website, active source product and variants, and
 `ValidFrom <= current UTC < ValidTo` (or no `ValidTo`). An optional GTIN filter is exact,
 case-sensitive binary equality with equal byte length (so SQL's trailing-space padding cannot
 broaden the selection), not fuzzy matching. Overlength GTIN inputs fail before SQL instead of
-being truncated. Sizes use nonempty `SizeInfo`, falling back
-to `SizeName`; `SizeName` need not be populated.
+being truncated. Sizes use nonempty `SizeInfo`, falling back to `SizeName`; `SizeName` need not be populated.
+
+Batch selection uses the same explicit active-target/subscription/website/product conditions, applies an optional exact Website-key filter, and orders by `MonitoringTarget.Id`. It selects no more than `--max-targets`; the hard default/maximum is 100,000. It does not use `IsDefaultForMonitoring`. Active source Variants are read for representative selection: on first qualification choose a non-null-GTIN Variant preferring size M, then lowest Variant ID. If the ProductMatch is already verified, poll only active variants whose ProductVariantMatches are already verified; do not fan out to unqualified variants in batch mode. No active verified variant yields `Incomplete` rather than expanding the crawl.
 
 ### Matches and append-only observations
 
@@ -115,13 +116,16 @@ key **`price-monitor-observation`**; absent/duplicate active configuration fails
 Runs start `Running`, `TriggerType = Manual`, with UTC start/heartbeat. Completion updates counts
 and UTC completion/heartbeat to canonical **`Succeeded`**, **`SucceededWithWarnings`** or **`Failed`**.
 `NoMatch`, `Ambiguous`, `Incomplete` are skipped targets/warnings; other non-success outcomes fail.
-`ItemsDiscovered` records requested bounded work; `ItemsProcessed` records actual outcome count,
-which can differ from the request count on input failure or cancellation.
+`ItemsDiscovered` records selected bounded work; `ItemsProcessed` records actual target outcomes,
+which can differ from the selection count on fatal selection failure or cancellation. For batches, a
+target-level `NoMatch`, `Ambiguous` or `Incomplete` is skipped with a warning; other non-success
+target outcomes count as failures. Safe target outcomes do not stop subsequent targets.
 Messages identify `EntityType = MonitoringTarget` and the target's numeric ID. Codes, diagnostics
 and error summaries are bounded to the supplied sizes. Routine target successes are not logged;
 one final `RunSummary` message stores created/reused match counts and observation count in
 `DetailsJson`, not invented run columns. Completion update and final summary are one transaction.
-On cancellation, the orchestrator supplies a bounded noncancelled finalization token.
+On cancellation, the orchestrator supplies a bounded noncancelled finalization token. The batch command
+is sequential and explicit; it does not install a recurring schedule.
 
 ### Manual integration registration
 

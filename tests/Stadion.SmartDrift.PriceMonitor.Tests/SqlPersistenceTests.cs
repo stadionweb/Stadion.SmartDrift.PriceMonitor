@@ -51,6 +51,37 @@ public sealed class SqlPersistenceTests
     }
 
     [Fact]
+    public async Task BatchSelectionIsActiveDeterministicWebsiteFilteredAndBounded()
+    {
+        var db = new ScriptedConnection();
+        db.Responses.Enqueue(RowsTable(
+            [typeof(long), typeof(long), typeof(int), typeof(string), typeof(long), typeof(string), typeof(string),
+                typeof(string), typeof(long), typeof(string), typeof(string), typeof(string)],
+            [2L, 2L, 1, "platou-sport", 35148L, "ArcTeryx", "Beta SL Jacket M", "X000010552",
+                54618L, "0623555782018", "M", DBNull.Value],
+            [2L, 2L, 1, "platou-sport", 35148L, "ArcTeryx", "Beta SL Jacket M", "X000010552",
+                54620L, "0623555782032", "XL", DBNull.Value],
+            [5L, 5L, 1, "platou-sport", 35152L, "Brand", "No GTIN", null!,
+                DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value]));
+
+        var targets = await new SqlMonitoringStore(() => db)
+            .ReadBatchTargetsAsync(new MonitoringBatchSelection("platou-sport", 10), default);
+
+        Assert.Equal(new long[] { 2, 5 }, targets.Select(t => t.TargetId));
+        Assert.Equal(new long[] { 54618, 54620 }, targets[0].Target.Variants.Select(v => v.Id));
+        Assert.Empty(targets[1].Target.Variants);
+        var command = Assert.Single(db.Commands);
+        foreach (var eligibility in new[] { "t.Status = N'Active'", "s.Status = N'Active'", "w.IsActive = 1",
+            "p.SourceActive = 1", "s.ValidFrom <=", "s.ValidTo >", "TOP (@MaxTargets)", "ORDER BY t.Id",
+            "v.SourceActive = 1" })
+            Assert.Contains(eligibility, command.CommandText);
+        Assert.DoesNotContain("IsDefaultForMonitoring", command.CommandText);
+        Parameter(command, "@MaxTargets", 10, DbType.Int32);
+        Parameter(command, "@WebsiteKey", "platou-sport", DbType.String, 100);
+        Assert.Null(command.Transaction);
+    }
+
+    [Fact]
     public async Task NonpositiveTargetRejectedBeforeOpeningSql()
     {
         var opened = false;
@@ -421,6 +452,14 @@ public sealed class SqlPersistenceTests
         var table = new DataTable();
         for (var i = 0; i < types.Length; i++) table.Columns.Add($"C{i}", types[i]);
         if (row is not null) table.Rows.Add(row);
+        return table;
+    }
+
+    private static DataTable RowsTable(Type[] types, params object[][] rows)
+    {
+        var table = new DataTable();
+        for (var i = 0; i < types.Length; i++) table.Columns.Add($"C{i}", types[i]);
+        foreach (var row in rows) table.Rows.Add(row);
         return table;
     }
 

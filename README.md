@@ -64,6 +64,23 @@ Every invocation opens an established IntegrationRun (`Running`), records target
 
 Cancellation propagates through reads, HTTP and persistence. A target's writes are committed together or rolled back together. Run finalization after cancellation uses a separate bounded cleanup token so the cancelled crawl token does not leave the execution in `Running`. Reporting occurs after target commit across the two databases: an Integration reporting failure does not undo a committed observation. Inspect persisted data before deliberately retrying.
 
+## Explicit persisted-monitoring batch
+
+Batch execution is an explicit one-shot command; default Worker startup still contacts neither SQL nor websites. For example, run up to ten active Platou Sport targets:
+
+```sh
+dotnet run --project src/Stadion.SmartDrift.PriceMonitor.Crawler -- \
+  --run persisted-monitoring-batch --website-key platou-sport --max-targets 10
+```
+
+`--website-key` and `--max-targets` are optional. Without a target limit, the command still enforces a hard maximum of 100,000 selected targets; a supplied limit must be between 1 and 100,000. Selection requires an active MonitoringTarget, active subscription within its validity dates, active Website and active source Product. It uses explicit targets only (never `IsDefaultForMonitoring`), orders by `MonitoringTarget.Id`, and selects only Website keys matching the optional filter. Unknown adapter keys fail only their own targets; remaining targets continue.
+
+Targets are processed sequentially, preserving each adapter's robots, pacing, request and discovery bounds. For a Product with no ProductMatch, batch mode discovers using one deterministic active Variant with a non-null GTIN: prefer `SizeInfo` (falling back to `SizeName`) equal to `M`, then the lowest `ProductVariant.Id`. A verified ProductMatch is polled only for active Variants that already have verified ProductVariantMatches. It does not fan out to all unqualified Variants; if no active verified Variant is available, the target is reported as `Incomplete`. No GTIN is generated.
+
+One invocation creates one `price-monitor-observation` IntegrationRun. Target outcomes such as Found, NoMatch, Incomplete, Ambiguous, RequiresRequalification, unknown adapter and crawl/persistence failure are reported and do not stop subsequent targets, except cancellation or fatal selection/configuration/database failures. The JSON summary includes selected eligible/processed/succeeded/skipped/failed/warning counts, result-code counts, observations and matches created/reused. Exit codes are **0** when the batch completes without target/fatal failures (safe skips are allowed), **1** for target failures or cancellation, and **2** for invalid command arguments or missing connection strings. Reruns reuse match identities and append new observations for successful polls; each rerun creates its own IntegrationRun.
+
+For a local no-SQL/no-live-HTTP rehearsal, add `--offline-fixture /absolute/path/to/fixture.json`. Batch fixtures may supply `BatchWorkItems` and `MatchesByTargetId`; fixture mode is not persisted acceptance. A small production-near acceptance run can use `--max-targets 5` or `10`, then run without a small limit to process the eligible set (up to the hard cap). **Recurring scheduling remains separate and is not installed by this command.**
+
 ### Local acceptance
 
 Use the eligibility, match, observation and run queries in `docs/database-contract.md` before and after the command above. Confirm Product 35148 / Website 1 has one ProductMatch, variant 54618 has one ProductVariantMatch with ExternalVariantId `392835`, and a new observation refers to both match IDs with live-parsed NOK price and the actual Platou URL. Run again: match counts remain one, observation history grows, and another completed IntegrationRun exists. The known external product ID is `392833`; the earlier live price is **not** an acceptance constant. Live database/site acceptance must be performed locally with authorized configuration.

@@ -7,6 +7,9 @@ namespace Stadion.SmartDrift.PriceMonitor.Crawler;
 public sealed record OfflineMonitoringFixture(
     MonitoringWorkItem Work, Dictionary<string, string> Responses, VerifiedProductMatch? Match = null)
 {
+    public IReadOnlyList<MonitoringWorkItem>? BatchWorkItems { get; init; }
+    public Dictionary<string, VerifiedProductMatch>? MatchesByTargetId { get; init; }
+
     public static async Task<PersistedMonitoringRunner> CreateRunnerAsync(string path, CancellationToken cancellationToken)
     {
         await using var stream = File.OpenRead(path);
@@ -28,7 +31,7 @@ public sealed record OfflineMonitoringFixture(
         }
     }
 
-    private sealed class FixtureMonitoring(OfflineMonitoringFixture fixture) : IMonitoringStore
+    private sealed class FixtureMonitoring(OfflineMonitoringFixture fixture) : IMonitoringStore, IBatchedMonitoringStore
     {
         private bool persisted;
 
@@ -41,10 +44,23 @@ public sealed record OfflineMonitoringFixture(
             return Task.FromResult(work);
         }
 
+        public Task<IReadOnlyList<MonitoringWorkItem>> ReadBatchTargetsAsync(
+            MonitoringBatchSelection selection, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var targets = (fixture.BatchWorkItems ?? [fixture.Work])
+                .Where(w => selection.WebsiteKey is null ||
+                    string.Equals(w.WebsiteKey, selection.WebsiteKey, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(w => w.TargetId)
+                .Take(selection.MaxTargets ?? MonitoringBatchSelection.HardMaxTargets)
+                .ToArray();
+            return Task.FromResult<IReadOnlyList<MonitoringWorkItem>>(targets);
+        }
+
         public Task<VerifiedProductMatch?> ReadVerifiedMatchAsync(MonitoringWorkItem work, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(fixture.Match);
+            return Task.FromResult(fixture.MatchesByTargetId?.GetValueOrDefault(work.TargetId.ToString()) ?? fixture.Match);
         }
 
         public Task<PersistedTargetCounts> PersistAsync(MonitoringWorkItem work, CrawlResult result, CancellationToken cancellationToken)
